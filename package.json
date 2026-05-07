@@ -6,8 +6,12 @@
   "description": "Roost: multi-workspace AI agent platform backend",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:edge": "bash scripts/typecheck-edge.sh",
+    "check:parity": "tsx scripts/check-runtime-parity.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ci": "npm run check:parity && npm run typecheck && npm run typecheck:edge && npm test",
     "seed": "tsx scripts/seed.ts",
     "set-webhook": "tsx scripts/set-telegram-webhook.ts",
     "migrate": "supabase db reset --local",

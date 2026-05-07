@@ -1,15 +1,9 @@
-// Roost: shared chat runtime (Node-side canonical implementation).
+// Roost: shared chat runtime (Node copy used by Vitest tests).
 //
-// IMPORTANT: this file and supabase/functions/_shared/chat-runtime.ts must
-// be kept in sync. The Edge Function copy uses Deno-style imports
-// (https://esm.sh/..., .ts extensions); this copy uses Node imports so
-// that vitest can exercise the logic. Both implement the same flow:
-//   1. Resolve workspace, agent, tools
-//   2. Load or create session
-//   3. Roll over budget if a new day, refuse if over budget
-//   4. Persist user message
-//   5. Loop: call Claude, persist results, dispatch tools, queue approvals
-//   6. Stop on end_turn / budget / error
+// Paired with supabase/functions/_shared/chat-runtime.ts (Deno, used by Edge
+// Functions). Business logic between SHARED_RUNTIME_START / SHARED_RUNTIME_END
+// must stay byte-equivalent (modulo comments and whitespace) to the Deno copy.
+// Run `npm run check:parity` to verify.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ChatStreamEvent, ChannelType, WorkspaceApprovalMode } from './types.js';
@@ -18,6 +12,8 @@ import { approvalRequired, loadAgentTools, toAnthropicToolDefs, type ToolRow } f
 import { runMockTool } from './tools.js';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.js';
 import { costUsd } from './pricing.js';
+
+// SHARED_RUNTIME_START
 
 export interface RunChatParams {
   client: SupabaseClient;
@@ -360,3 +356,32 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   await touchSession(client, sessionId);
   yield { type: 'done', cost_usd: Number(totalCost.toFixed(6)), tokens_in: totalIn, tokens_out: totalOut };
 }
+
+// Convenience: drive runChat to completion and collect final assistant text.
+export async function runChatCollecting(
+  params: RunChatParams,
+  onEvent: (e: ChatStreamEvent) => void | Promise<void>,
+): Promise<{ result: ChatRunResult; finalText: string }> {
+  let sessionId = params.sessionId ?? '';
+  let totalCost = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let finalText = '';
+
+  for await (const ev of runChat(params)) {
+    await onEvent(ev);
+    if (ev.type === 'session') sessionId = ev.session_id;
+    if (ev.type === 'token') finalText += ev.text;
+    if (ev.type === 'done') {
+      totalCost = ev.cost_usd;
+      tokensIn = ev.tokens_in;
+      tokensOut = ev.tokens_out;
+    }
+  }
+  return {
+    result: { sessionId, costUsd: totalCost, tokensIn, tokensOut },
+    finalText,
+  };
+}
+
+// SHARED_RUNTIME_END

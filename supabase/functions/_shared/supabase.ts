@@ -3,7 +3,7 @@
 // authoritative server-side runtime calls.
 
 // @ts-ignore: remote import resolved by Deno at runtime, not by tsc.
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { createClient, SupabaseClient } from 'npm:@supabase/supabase-js@2.45.0';
 import { env } from './env.ts';
 
 export function serviceRoleClient(): SupabaseClient {

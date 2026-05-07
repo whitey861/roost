@@ -10,3 +10,5 @@ coverage/
 .supabase/
 supabase/.branches/
 supabase/.temp/
+.deno_cache/
+deno.lock

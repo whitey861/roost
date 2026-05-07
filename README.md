@@ -163,15 +163,54 @@ The suite covers:
   budget enforcement, day-rollover behaviour
 - history reconstruction (DB rows to Claude messages)
 - Telegram slash and callback parsers, pairing code generator
+- runtime parity script and its helper edge cases
 
 The tests use a Node-level fake of `SupabaseClient` (`tests/fakes/`) and
 a scripted fake of `AnthropicClient`. No real API calls are made.
 
+## Local development guardrails
+
+Run before pushing:
+
+```bash
+npm run ci
+```
+
+This runs four steps in order: parity check, Node typecheck, Edge
+Function typecheck, then the Vitest suite. Each is also runnable
+individually.
+
+- `npm run check:parity` - confirms `shared/chat-runtime.ts` and
+  `supabase/functions/_shared/chat-runtime.ts` haven't drifted.
+  Both files contain a canonical block delimited by
+  `// SHARED_RUNTIME_START` and `// SHARED_RUNTIME_END` markers.
+  The script strips comments and whitespace, hashes each block, and
+  fails if the hashes differ. Imports and adapter glue live outside
+  the markers and may differ between Node and Deno; business logic
+  (the agent loop, tool dispatch, approval gating, budget math,
+  message persistence ordering) lives inside and must be identical.
+- `npm run typecheck` - runs TypeScript against everything outside
+  `supabase/functions/` (shared modules, scripts, tests).
+- `npm run typecheck:edge` - runs `deno check` on every Edge Function
+  entry point. Requires `deno` on PATH. The script materialises
+  npm dependencies via `npm ci` if `node_modules` is missing, then
+  asks Deno to resolve `npm:` specifiers from there.
+- `npm test` - runs Vitest.
+
+If you add or rename files in `supabase/functions/`, the typecheck
+script auto-discovers them. If you add a new Edge Function and it
+fails `deno check`, fix the import or type issue. Don't exclude the
+file; don't disable the check.
+
+The same four steps run on every push and PR via
+`.github/workflows/ci.yml`. Tests use the in-memory fakes so CI
+needs no Supabase or Anthropic secrets.
+
 ## Notes
 
 - Both copies of the chat runtime (Node and Deno) implement the same
-  flow. Edits in one must be mirrored in the other. There's a comment
-  at the top of each file calling this out.
+  flow. Edits in one must be mirrored in the other. The parity script
+  enforces this; see "Local development guardrails" above.
 - All money-spending operations check `workspaces.daily_spent_usd`
   before firing and update it after. Budget rollover is daily at
   the first request after midnight UTC.

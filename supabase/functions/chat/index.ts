@@ -3,8 +3,6 @@
 // events back to the client. Body shape:
 //   { workspace_id: uuid, session_id?: uuid, agent_id?: uuid, message: string }
 
-// @ts-ignore: Deno serve API.
-import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { requireAuth } from '../_shared/auth.ts';
 import { serviceRoleClient } from '../_shared/supabase.ts';
 import { jsonError, corsHeaders, HttpError } from '../_shared/errors.ts';
@@ -105,4 +103,5 @@ async function handle(req: Request): Promise<Response> {
   });
 }
 
-serve(handle);
+// deno-lint-ignore no-explicit-any
+(globalThis as any).Deno?.serve(handle);

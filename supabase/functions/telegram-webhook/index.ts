@@ -4,8 +4,6 @@
 //
 // Auth: requires X-Telegram-Bot-Api-Secret-Token to match TELEGRAM_WEBHOOK_SECRET.
 
-// @ts-ignore: Deno serve API.
-import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { serviceRoleClient } from '../_shared/supabase.ts';
 import { env, envOptional } from '../_shared/env.ts';
 import { jsonError, jsonOk } from '../_shared/errors.ts';
@@ -420,7 +418,8 @@ async function handle(req: Request): Promise<Response> {
 const isDeno = typeof (globalThis as { Deno?: unknown }).Deno !== 'undefined';
 const skipServe = envOptional('ROOST_SKIP_SERVE') === '1';
 if (isDeno && !skipServe) {
-  serve(handle);
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).Deno.serve(handle);
 }
 
 export { handle };

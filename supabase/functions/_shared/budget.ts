@@ -4,7 +4,7 @@
 // so we use atomic updates.
 
 // @ts-ignore: remote import resolved by Deno at runtime.
-import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { SupabaseClient } from 'npm:@supabase/supabase-js@2.45.0';
 
 export interface BudgetState {
   budgetUsd: number;

@@ -3,8 +3,6 @@
 // 10-minute expiry and returns the bot username so the frontend can show
 // "Send /start <code> to @bot".
 
-// @ts-ignore: Deno serve API.
-import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { requireAuth } from '../_shared/auth.ts';
 import { serviceRoleClient } from '../_shared/supabase.ts';
 import { jsonError, jsonOk, corsHeaders, HttpError } from '../_shared/errors.ts';
@@ -59,4 +57,5 @@ async function handle(req: Request): Promise<Response> {
   return jsonOk({ code, expires_at: expiresAt, bot_username: botUsername });
 }
 
-serve(handle);
+// deno-lint-ignore no-explicit-any
+(globalThis as any).Deno?.serve(handle);

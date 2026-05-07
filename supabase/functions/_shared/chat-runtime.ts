@@ -1,18 +1,22 @@
-// Roost: shared chat runtime.
-// Drives the Claude tool-use loop, persists messages, gates outbound tools
-// via outbound_actions, and tracks budget.
+// Roost: shared chat runtime (Deno copy for Edge Functions).
+//
+// Paired with shared/chat-runtime.ts (Node, used by Vitest). Business logic
+// between SHARED_RUNTIME_START / SHARED_RUNTIME_END must stay byte-equivalent
+// (modulo comments and whitespace) to the Node copy. Run `npm run check:parity`.
 //
 // Used by:
 //  - /chat (web): emits ChatStreamEvent over SSE.
 //  - /telegram-webhook: consumes events and edits a Telegram message.
 
 // @ts-ignore: remote import resolved by Deno at runtime.
-import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+import { SupabaseClient } from 'npm:@supabase/supabase-js@2.45.0';
 import type { ChatStreamEvent, ChannelType, WorkspaceApprovalMode } from './types.ts';
 import { addSpend, getBudgetState, isOverBudget, rolloverIfNeeded } from './budget.ts';
-import { approvalRequired, loadAgentTools, runMockTool, toAnthropicToolDefs } from './tools.ts';
+import { approvalRequired, loadAgentTools, runMockTool, toAnthropicToolDefs, type ToolRow } from './tools.ts';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.ts';
 import { costUsd } from './pricing.ts';
+
+// SHARED_RUNTIME_START
 
 export interface RunChatParams {
   client: SupabaseClient;
@@ -34,7 +38,6 @@ export interface ChatRunResult {
   tokensOut: number;
 }
 
-// Helper: load workspace, agent, system prompt, allowed tools, approval mode.
 async function loadContext(client: SupabaseClient, workspaceId: string, agentId?: string) {
   const { data: ws, error: wsErr } = await client
     .from('workspaces')
@@ -42,17 +45,18 @@ async function loadContext(client: SupabaseClient, workspaceId: string, agentId?
     .eq('id', workspaceId)
     .single();
   if (wsErr || !ws) throw new Error(`Workspace not found: ${workspaceId}`);
-  if (!ws.active) throw new Error(`Workspace is inactive: ${ws.slug}`);
+  const wsTyped = ws as { id: string; slug: string; name: string; approval_mode: WorkspaceApprovalMode; active: boolean };
+  if (!wsTyped.active) throw new Error(`Workspace is inactive: ${wsTyped.slug}`);
 
   let agentQuery = client.from('agents').select('*').eq('workspace_id', workspaceId).eq('active', true);
   if (agentId) agentQuery = agentQuery.eq('id', agentId);
   const { data: agents, error: aErr } = await agentQuery.order('created_at', { ascending: true }).limit(1);
   if (aErr) throw new Error(`Agent lookup failed: ${aErr.message}`);
-  const agent = agents?.[0];
+  const agent = agents?.[0] as { id: string; system_prompt: string; model: string; allowed_tool_ids: string[] } | undefined;
   if (!agent) throw new Error('No active agent found for workspace.');
 
   const tools = await loadAgentTools(client, agent.id, agent.allowed_tool_ids ?? []);
-  return { workspace: ws as { id: string; slug: string; name: string; approval_mode: WorkspaceApprovalMode; active: boolean }, agent, tools };
+  return { workspace: wsTyped, agent, tools };
 }
 
 async function loadOrCreateSession(
@@ -62,7 +66,7 @@ async function loadOrCreateSession(
   if (args.sessionId) {
     const { data, error } = await client.from('sessions').select('id').eq('id', args.sessionId).single();
     if (error || !data) throw new Error(`Session not found: ${args.sessionId}`);
-    return data.id as string;
+    return (data as { id: string }).id;
   }
   const title = args.firstMessage.slice(0, 60);
   const { data, error } = await client
@@ -78,40 +82,50 @@ async function loadOrCreateSession(
     .select('id')
     .single();
   if (error || !data) throw new Error(`Session create failed: ${error?.message}`);
-  return data.id as string;
+  return (data as { id: string }).id;
 }
 
-async function loadHistory(client: SupabaseClient, sessionId: string): Promise<AnthropicMessage[]> {
+export async function loadHistory(client: SupabaseClient, sessionId: string): Promise<AnthropicMessage[]> {
   const { data, error } = await client
     .from('messages')
     .select('role, content, tool_call_id, tool_name, tool_input, tool_output')
     .eq('session_id', sessionId)
     .order('created_at', { ascending: true });
   if (error) throw new Error(`History load failed: ${error.message}`);
+  return reconstructHistory(
+    (data ?? []) as Array<{
+      role: string;
+      content: string | null;
+      tool_call_id: string | null;
+      tool_name: string | null;
+      tool_input: Record<string, unknown> | null;
+      tool_output: Record<string, unknown> | null;
+    }>,
+  );
+}
 
+// Pure: turn ordered DB rows into Claude-shaped message history.
+export function reconstructHistory(rows: Array<{
+  role: string;
+  content: string | null;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  tool_input: Record<string, unknown> | null;
+  tool_output: Record<string, unknown> | null;
+}>): AnthropicMessage[] {
   const messages: AnthropicMessage[] = [];
   let pendingAssistant: AnthropicMessageContent[] | null = null;
   let pendingToolResults: AnthropicMessageContent[] | null = null;
 
-  for (const m of data ?? []) {
+  for (const m of rows) {
     if (m.role === 'user') {
-      if (pendingAssistant) {
-        messages.push({ role: 'assistant', content: pendingAssistant });
-        pendingAssistant = null;
-      }
-      if (pendingToolResults) {
-        messages.push({ role: 'user', content: pendingToolResults });
-        pendingToolResults = null;
-      }
+      if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
+      if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
       messages.push({ role: 'user', content: m.content ?? '' });
     } else if (m.role === 'assistant') {
-      if (pendingToolResults) {
-        messages.push({ role: 'user', content: pendingToolResults });
-        pendingToolResults = null;
-      }
-      const block: AnthropicMessageContent = { type: 'text', text: m.content ?? '' };
+      if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
       pendingAssistant = pendingAssistant ?? [];
-      pendingAssistant.push(block);
+      pendingAssistant.push({ type: 'text', text: m.content ?? '' });
     } else if (m.role === 'tool_call') {
       pendingAssistant = pendingAssistant ?? [];
       pendingAssistant.push({
@@ -121,10 +135,7 @@ async function loadHistory(client: SupabaseClient, sessionId: string): Promise<A
         input: (m.tool_input ?? {}) as Record<string, unknown>,
       });
     } else if (m.role === 'tool_result') {
-      if (pendingAssistant) {
-        messages.push({ role: 'assistant', content: pendingAssistant });
-        pendingAssistant = null;
-      }
+      if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
       pendingToolResults = pendingToolResults ?? [];
       pendingToolResults.push({
         type: 'tool_result',
@@ -138,9 +149,6 @@ async function loadHistory(client: SupabaseClient, sessionId: string): Promise<A
   return messages;
 }
 
-// Persist a synthesised assistant message that bundles text + tool_use blocks
-// in the order they came in. Tool calls and tool results are stored as
-// separate rows so we can replay them with proper structure on next turn.
 async function persistAssistantTurn(
   client: SupabaseClient,
   sessionId: string,
@@ -191,11 +199,7 @@ async function persistToolResult(
 }
 
 async function persistUserMessage(client: SupabaseClient, sessionId: string, text: string): Promise<void> {
-  await client.from('messages').insert({
-    session_id: sessionId,
-    role: 'user',
-    content: text,
-  });
+  await client.from('messages').insert({ session_id: sessionId, role: 'user', content: text });
 }
 
 async function touchSession(client: SupabaseClient, sessionId: string): Promise<void> {
@@ -217,7 +221,6 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   });
   yield { type: 'session', session_id: sessionId };
 
-  // Budget: rollover if a new day, then refuse if already over.
   const initialState = await rolloverIfNeeded(client, workspace.id);
   if (isOverBudget(initialState)) {
     yield { type: 'budget_exceeded', spent_usd: initialState.spentUsd, budget_usd: initialState.budgetUsd };
@@ -276,8 +279,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      yield { type: 'error', code: 'anthropic_error', message };
+      yield { type: 'error', code: 'anthropic_error', message: err instanceof Error ? err.message : String(err) };
       break;
     }
 
@@ -291,17 +293,16 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 
     messages.push({ role: 'assistant', content: assistantContent });
 
-    const toolUses = assistantContent.filter((b): b is Extract<AnthropicMessageContent, { type: 'tool_use' }> => b.type === 'tool_use');
+    const toolUses = assistantContent.filter(
+      (b): b is Extract<AnthropicMessageContent, { type: 'tool_use' }> => b.type === 'tool_use',
+    );
 
-    if (stopReason !== 'tool_use' || toolUses.length === 0) {
-      break;
-    }
+    if (stopReason !== 'tool_use' || toolUses.length === 0) break;
 
-    // Build a single user-role message containing all tool_result blocks.
     const toolResultBlocks: AnthropicMessageContent[] = [];
 
     for (const tu of toolUses) {
-      const toolRow = tools.find((t) => t.name === tu.name);
+      const toolRow = tools.find((t: ToolRow) => t.name === tu.name);
       if (!toolRow) {
         const out = { ok: false, error: `Tool not allowed: ${tu.name}` };
         yield { type: 'tool_result', tool_call_id: tu.id, output: out };
@@ -313,7 +314,6 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
       const decision = await approvalRequired(client, agent.id, toolRow, workspace.approval_mode);
 
       if (decision.requiresApproval) {
-        // Insert a pending outbound_action and feed Claude a synthetic result.
         const { data: action, error: aerr } = await client
           .from('outbound_actions')
           .insert({
@@ -334,14 +334,14 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
           toolResultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out), is_error: true });
           continue;
         }
-        const out = { status: 'queued_for_approval', action_id: action.id };
-        yield { type: 'tool_result', tool_call_id: tu.id, output: out, queued_for_approval: true, action_id: action.id as string };
+        const actionId = (action as { id: string }).id;
+        const out = { status: 'queued_for_approval', action_id: actionId };
+        yield { type: 'tool_result', tool_call_id: tu.id, output: out, queued_for_approval: true, action_id: actionId };
         await persistToolResult(client, sessionId, tu.id, tu.name, out);
         toolResultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out) });
         continue;
       }
 
-      // Execute via mock handler in this phase.
       let out: Record<string, unknown>;
       try {
         out = runMockTool(tu.name, tu.input);
@@ -361,7 +361,6 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 }
 
 // Convenience: drive runChat to completion and collect final assistant text.
-// Used by the Telegram path so we can edit a single message progressively.
 export async function runChatCollecting(
   params: RunChatParams,
   onEvent: (e: ChatStreamEvent) => void | Promise<void>,
@@ -387,3 +386,5 @@ export async function runChatCollecting(
     finalText,
   };
 }
+
+// SHARED_RUNTIME_END
