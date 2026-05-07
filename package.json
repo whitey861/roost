@@ -1,0 +1,33 @@
+{
+  "name": "roost-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Roost: multi-workspace AI agent platform backend",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "tsx scripts/seed.ts",
+    "set-webhook": "tsx scripts/set-telegram-webhook.ts",
+    "migrate": "supabase db reset --local",
+    "migrate:push": "supabase db push",
+    "dev:functions": "supabase functions serve --no-verify-jwt --env-file ./.env",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "format:check": "echo 'no formatter configured'"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.1",
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
