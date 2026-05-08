@@ -15,6 +15,7 @@
     "seed": "tsx scripts/seed.ts",
     "ingest": "tsx scripts/ingest.ts",
     "ingest-claude-export": "tsx scripts/ingest-claude-export.ts",
+    "sync-prompts": "tsx scripts/sync-prompts.ts",
     "reindex": "tsx scripts/reindex.ts",
     "set-webhook": "tsx scripts/set-telegram-webhook.ts",
     "migrate": "supabase db reset --local",

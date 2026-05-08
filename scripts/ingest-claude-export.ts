@@ -9,16 +9,15 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import {
+  discoverExport,
   estimateCost,
   ingestOneConversation,
   loadWorkspaceIdMap,
   makeAnthropicClassifier,
-  parseConversations,
   summarise,
   type ConversationRunReport,
+  type ExportBatch,
   type PipelineSummary,
 } from '../shared/claude-export.js';
 import { voyageEmbedder } from '../shared/ingest-core.js';
@@ -31,6 +30,7 @@ interface CliArgs {
   force?: boolean;
   limit?: number;
   excludePersonal?: boolean;
+  projectsOnly?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -42,15 +42,18 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--force') out.force = true;
     else if (a === '--limit') out.limit = Number(argv[++i]);
     else if (a === '--exclude-personal') out.excludePersonal = true;
+    else if (a === '--projects-only') out.projectsOnly = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Roost: ingest a Claude.ai conversations export.
 
 Options:
-  --path <dir>           extracted export folder (containing conversations.json)
+  --path <dir>           extracted export folder (containing conversations.json
+                         and optionally projects/<project_name>/...)
   --dry-run              classify only, no Supabase writes, no embeds
   --force                re-classify and re-ingest existing conversations
   --limit <n>            only process the first n conversations (testing)
   --exclude-personal     remap personal-classified conversations to none
+  --projects-only        skip top-level conversations.json; ingest only projects/
 `);
       process.exit(0);
     }
@@ -62,16 +65,6 @@ function requireEnv(key: string): string {
   const v = process.env[key];
   if (!v) throw new Error(`Missing env var: ${key}`);
   return v;
-}
-
-function loadConversationsFile(exportPath: string): unknown {
-  if (!existsSync(exportPath)) throw new Error(`Path does not exist: ${exportPath}`);
-  const stat = statSync(exportPath);
-  const conversationsPath = stat.isDirectory() ? join(exportPath, 'conversations.json') : exportPath;
-  if (!existsSync(conversationsPath)) {
-    throw new Error(`conversations.json not found at ${conversationsPath}`);
-  }
-  return JSON.parse(readFileSync(conversationsPath, 'utf8'));
 }
 
 function pad(s: string | number, width: number, right = false): string {
@@ -148,14 +141,30 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const raw = loadConversationsFile(args.path);
-  let conversations = parseConversations(raw);
-  if (args.limit && args.limit > 0) conversations = conversations.slice(0, args.limit);
-  if (conversations.length === 0) {
+  const batches: ExportBatch[] = discoverExport(args.path, { projectsOnly: args.projectsOnly });
+  // Apply --limit across the combined stream of conversations.
+  let remaining = args.limit && args.limit > 0 ? args.limit : Infinity;
+  const limited: ExportBatch[] = [];
+  let totalParsed = 0;
+  for (const b of batches) {
+    if (remaining <= 0) break;
+    if (b.conversations.length <= remaining) {
+      limited.push(b);
+      remaining -= b.conversations.length;
+      totalParsed += b.conversations.length;
+    } else {
+      limited.push({ projectName: b.projectName, conversations: b.conversations.slice(0, remaining) });
+      totalParsed += remaining;
+      remaining = 0;
+    }
+  }
+  if (totalParsed === 0) {
     console.log('No conversations parsed. Nothing to do.');
     return;
   }
-  console.log(`Parsed ${conversations.length} conversations from ${args.path}.`);
+  const projectCount = limited.filter((b) => b.projectName !== null).length;
+  const rootCount = limited.find((b) => b.projectName === null)?.conversations.length ?? 0;
+  console.log(`Parsed ${totalParsed} conversations from ${args.path} (${rootCount} top-level, ${projectCount} project batch${projectCount === 1 ? '' : 'es'}).`);
 
   // Live wiring.
   const supabaseUrl = args.dryRun ? '' : requireEnv('SUPABASE_URL');
@@ -172,23 +181,33 @@ async function main(): Promise<void> {
   const workspaceIds = client ? await loadWorkspaceIdMap(client) : {};
 
   const reports: ConversationRunReport[] = [];
-  for (const conv of conversations) {
-    try {
-      const r = await ingestOneConversation(
-        // For dry-run we pass a no-op client (the function won't write).
-        client ?? createInertClient(),
-        embed,
-        classifier,
-        workspaceIds,
-        conv,
-        { dryRun: args.dryRun ?? false, force: args.force ?? false, excludePersonal: args.excludePersonal ?? false },
-      );
-      reports.push(r);
-      console.log(reportLine(r));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[error] ${conv.name}: ${msg}`);
-      reports.push({ uuid: conv.uuid, title: conv.name, outcome: 'skip-none', error: msg });
+  for (const batch of limited) {
+    if (batch.projectName) {
+      console.log(`\n[project] ${batch.projectName}: ${batch.conversations.length} conversations`);
+    }
+    for (const conv of batch.conversations) {
+      try {
+        const r = await ingestOneConversation(
+          // For dry-run we pass a no-op client (the function won't write).
+          client ?? createInertClient(),
+          embed,
+          classifier,
+          workspaceIds,
+          conv,
+          {
+            dryRun: args.dryRun ?? false,
+            force: args.force ?? false,
+            excludePersonal: args.excludePersonal ?? false,
+            projectName: batch.projectName ?? undefined,
+          },
+        );
+        reports.push(r);
+        console.log(reportLine(r));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[error] ${conv.name}: ${msg}`);
+        reports.push({ uuid: conv.uuid, title: conv.name, outcome: 'skip-none', error: msg });
+      }
     }
   }
 

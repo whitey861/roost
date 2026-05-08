@@ -1,9 +1,41 @@
-// Static checks on seed definitions. Behavioural seed runs hit a real
-// Supabase, which is out of scope for unit tests.
+// Static checks on seed definitions plus behavioural tests for the
+// agent-seeding logic (system_prompt protection, sync-prompts).
+//
+// Behavioural seed runs hit a real Supabase, which is out of scope for
+// unit tests; we run the relevant functions against the in-memory
+// FakeSupabaseClient instead.
 
 import { describe, it, expect } from 'vitest';
-import { WORKSPACES, AGENTS } from '../shared/agents.js';
+import { randomUUID } from 'node:crypto';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { WORKSPACES, AGENTS, DEFAULT_MODEL, loadSystemPrompt } from '../shared/agents.js';
 import { TOOLS } from '../shared/tools.js';
+import { ensureAgents } from '../scripts/seed.js';
+import { syncOnePrompt, syncPrompts } from '../scripts/sync-prompts.js';
+import { FakeDb, FakeSupabaseClient } from './fakes/fake-supabase.js';
+
+function fakeClient(): { client: SupabaseClient; db: FakeDb } {
+  const db = new FakeDb();
+  const client = new FakeSupabaseClient(db) as unknown as SupabaseClient;
+  return { client, db };
+}
+
+function seedWorkspacesAndTools(db: FakeDb): { workspaceIds: Record<string, string>; toolIds: Record<string, string> } {
+  const workspaceIds: Record<string, string> = {};
+  db.seedTable('workspaces', WORKSPACES.map((w) => {
+    const id = randomUUID();
+    workspaceIds[w.slug] = id;
+    return { id, slug: w.slug, name: w.name, description: w.description };
+  }));
+  const toolIds: Record<string, string> = {};
+  db.seedTable('tools', TOOLS.map((t) => {
+    const id = randomUUID();
+    toolIds[t.name] = id;
+    return { id, name: t.name };
+  }));
+  db.seedTable('agents', []);
+  return { workspaceIds, toolIds };
+}
 
 describe('seed: workspaces and agents', () => {
   it('seeds the five expected workspaces', () => {
@@ -18,17 +50,18 @@ describe('seed: workspaces and agents', () => {
     }
   });
 
-  it('agent system prompts include the workspace context', () => {
+  it('every agent points at a readable prompt file', () => {
     for (const a of AGENTS) {
-      const ws = WORKSPACES.find((w) => w.slug === a.workspaceSlug)!;
-      expect(a.systemPrompt).toContain(ws.description);
+      expect(a.promptFile).toBe(`prompts/${a.workspaceSlug}.md`);
+      const text = loadSystemPrompt(a);
+      expect(text.length).toBeGreaterThan(0);
+      expect(text.includes('—')).toBe(false);
     }
   });
 
-  it('agent system prompts contain no em dashes', () => {
-    for (const a of AGENTS) {
-      expect(a.systemPrompt.includes('—')).toBe(false);
-    }
+  it('all seeded agents default to Sonnet 4.6', () => {
+    expect(DEFAULT_MODEL).toBe('claude-sonnet-4-6');
+    for (const a of AGENTS) expect(a.model).toBe('claude-sonnet-4-6');
   });
 });
 
@@ -44,5 +77,130 @@ describe('seed: tools', () => {
     const t = TOOLS.find((x) => x.name === 'mock_send_email')!;
     expect(t.isOutbound).toBe(true);
     expect(t.requiresApprovalDefault).toBe(true);
+  });
+});
+
+describe('ensureAgents: behaviour', () => {
+  it('creates new agents from prompt files on a fresh database', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds, toolIds } = seedWorkspacesAndTools(db);
+    await ensureAgents(client, workspaceIds, toolIds);
+    const agents = db.tableRows('agents');
+    expect(agents).toHaveLength(5);
+    for (const a of agents) {
+      expect(typeof a.system_prompt).toBe('string');
+      expect((a.system_prompt as string).length).toBeGreaterThan(0);
+      expect(a.model).toBe('claude-sonnet-4-6');
+    }
+  });
+
+  it('does not overwrite an existing agent\'s system_prompt', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds, toolIds } = seedWorkspacesAndTools(db);
+
+    // Pre-seed a synthetic agent for the pmhc workspace with a
+    // hand-tuned prompt that must survive the next ensureAgents() call.
+    const pmhcId = workspaceIds.pmhc!;
+    const existingId = randomUUID();
+    db.seedTable('agents', [
+      {
+        id: existingId,
+        workspace_id: pmhcId,
+        name: 'PMHC Assistant',
+        role_description: 'old desc',
+        system_prompt: 'pre-existing manual prompt',
+        model: 'claude-opus-4-7',
+        allowed_tool_ids: [],
+      },
+    ]);
+
+    await ensureAgents(client, workspaceIds, toolIds);
+
+    const pmhcAgent = db.tableRows('agents').find((a) => a.id === existingId)!;
+    expect(pmhcAgent.system_prompt).toBe('pre-existing manual prompt');
+    // Other fields ARE refreshed on update.
+    expect(pmhcAgent.role_description).toBe('Default assistant for the PMHC workspace.');
+    expect(pmhcAgent.model).toBe('claude-sonnet-4-6');
+    // Allowed tools are repopulated from the seed definition.
+    expect(Array.isArray(pmhcAgent.allowed_tool_ids)).toBe(true);
+    expect((pmhcAgent.allowed_tool_ids as string[]).length).toBeGreaterThan(0);
+  });
+});
+
+describe('syncPrompts: behaviour', () => {
+  it('updates a stale system_prompt for one workspace', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds } = seedWorkspacesAndTools(db);
+
+    // Existing agent with a stale prompt body.
+    const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
+    db.seedTable('agents', [
+      {
+        id: randomUUID(),
+        workspace_id: workspaceIds.pmhc!,
+        name: pmhcAgent.name,
+        role_description: 'role',
+        system_prompt: 'old prompt content',
+        model: 'claude-sonnet-4-6',
+        allowed_tool_ids: [],
+      },
+    ]);
+
+    const results = await syncPrompts(client, { workspace: 'pmhc' });
+    expect(results).toHaveLength(1);
+    expect(results[0]?.status).toBe('updated');
+    expect(results[0]?.diff).toMatch(/words/);
+
+    const stored = db.tableRows('agents')[0]?.system_prompt as string;
+    expect(stored).toBe(loadSystemPrompt(pmhcAgent));
+  });
+
+  it('reports unchanged when the DB matches the file', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds } = seedWorkspacesAndTools(db);
+    const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
+    const text = loadSystemPrompt(pmhcAgent);
+    db.seedTable('agents', [
+      {
+        id: randomUUID(),
+        workspace_id: workspaceIds.pmhc!,
+        name: pmhcAgent.name,
+        role_description: 'role',
+        system_prompt: text,
+        model: 'claude-sonnet-4-6',
+        allowed_tool_ids: [],
+      },
+    ]);
+
+    const r = await syncOnePrompt(client, pmhcAgent);
+    expect(r.status).toBe('unchanged');
+  });
+
+  it('reports missing-agent when the agent does not exist yet', async () => {
+    const { client, db } = fakeClient();
+    seedWorkspacesAndTools(db);
+    const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
+    const r = await syncOnePrompt(client, pmhcAgent);
+    expect(r.status).toBe('missing-agent');
+  });
+
+  it('--dry-run does not write', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds } = seedWorkspacesAndTools(db);
+    const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
+    db.seedTable('agents', [
+      {
+        id: randomUUID(),
+        workspace_id: workspaceIds.pmhc!,
+        name: pmhcAgent.name,
+        role_description: 'role',
+        system_prompt: 'untouched',
+        model: 'claude-sonnet-4-6',
+        allowed_tool_ids: [],
+      },
+    ]);
+    const r = await syncOnePrompt(client, pmhcAgent, { dryRun: true });
+    expect(r.status).toBe('updated');
+    expect(db.tableRows('agents')[0]?.system_prompt).toBe('untouched');
   });
 });

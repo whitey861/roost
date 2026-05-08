@@ -4,6 +4,8 @@
 // a fake classifier and a fake embedder; the CLI wires up the real ones.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { ingestDocument, type EmbedderFn, type IngestResult } from './ingest-core.js';
 import { WORKSPACES } from './agents.js';
 
@@ -158,15 +160,26 @@ function truncate(s: string, n: number): string {
   return s.slice(0, n).trimEnd() + '...';
 }
 
-export function buildClassifierPrompts(conv: ParsedConversation): { systemPrompt: string; userPrompt: string } {
+// Strip characters that would break the YAML inline tag list.
+function tagSafe(s: string): string {
+  return s.replace(/[\[\],\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+export function buildClassifierPrompts(
+  conv: ParsedConversation,
+  options: { projectName?: string } = {},
+): { systemPrompt: string; userPrompt: string } {
   const firstUser = conv.messages.find((m) => m.sender === 'human');
   const firstAssistant = conv.messages.find((m) => m.sender === 'assistant');
-  const userPrompt = [
-    `Title: ${conv.name}`,
-    `First user message: ${truncate(firstUser?.text ?? '(none)', 500)}`,
-    `First assistant message: ${truncate(firstAssistant?.text ?? '(none)', 500)}`,
-  ].join('\n');
-  return { systemPrompt: CLASSIFIER_SYSTEM_PROMPT, userPrompt };
+  const lines = [`Title: ${conv.name}`];
+  if (options.projectName) {
+    // Conversations inside a Claude.ai Project share a theme. Surface that
+    // to the classifier as a strong hint, second only to the title.
+    lines.push(`Project: ${options.projectName} (this conversation is part of a Claude.ai Project named "${options.projectName}"; that is strong context for classification)`);
+  }
+  lines.push(`First user message: ${truncate(firstUser?.text ?? '(none)', 500)}`);
+  lines.push(`First assistant message: ${truncate(firstAssistant?.text ?? '(none)', 500)}`);
+  return { systemPrompt: CLASSIFIER_SYSTEM_PROMPT, userPrompt: lines.join('\n') };
 }
 
 // Defensive JSON extractor: tolerates markdown code fences, surrounding
@@ -300,10 +313,10 @@ function defaultThreshold(): number {
 export async function classifyConversation(
   conv: ParsedConversation,
   classifier: Classifier,
-  options: { lowConfidenceThreshold?: number } = {},
+  options: { lowConfidenceThreshold?: number; projectName?: string } = {},
 ): Promise<ClassifyResult> {
   const threshold = options.lowConfidenceThreshold ?? defaultThreshold();
-  const { systemPrompt, userPrompt } = buildClassifierPrompts(conv);
+  const { systemPrompt, userPrompt } = buildClassifierPrompts(conv, { projectName: options.projectName });
   let lastUsage: ClassifierUsage = { inputTokens: 0, outputTokens: 0 };
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -411,6 +424,7 @@ export interface IngestPipelineOptions {
   force?: boolean;
   dryRun?: boolean;
   excludePersonal?: boolean;
+  projectName?: string;
 }
 
 export interface ConversationRunReport {
@@ -474,7 +488,9 @@ export async function ingestOneConversation(
     }
   }
 
-  const { classification, usage: classifierUsage } = await classifyConversation(conv, classifier);
+  const { classification, usage: classifierUsage } = await classifyConversation(conv, classifier, {
+    projectName: opts.projectName,
+  });
 
   if (classification.workspace === 'none') {
     return { uuid: conv.uuid, title: conv.name, outcome: 'skip-none', classification, classifierUsage };
@@ -545,6 +561,7 @@ export async function ingestOneConversation(
   // existing ingest-core picks up title, tags, source_url cleanly.
   const tags = ['claude_export', workspaceSlug];
   if (secondaryWorkspaces.length > 0) tags.push(...secondaryWorkspaces.map((s) => `also:${s}`));
+  if (opts.projectName) tags.push(`project:${tagSafe(opts.projectName)}`);
   const frontmatter = [
     '---',
     `title: ${conv.name.replace(/\n/g, ' ').slice(0, 200)}`,
@@ -565,11 +582,15 @@ export async function ingestOneConversation(
     force: true,
   });
 
-  // Stamp the metadata column with secondary workspaces if any.
-  if (secondaryWorkspaces.length > 0) {
+  // Stamp the metadata column with secondary workspaces and/or the
+  // originating Claude.ai project if either applies.
+  const metadata: Record<string, unknown> = {};
+  if (secondaryWorkspaces.length > 0) metadata.secondary_workspaces = secondaryWorkspaces;
+  if (opts.projectName) metadata.project = opts.projectName;
+  if (Object.keys(metadata).length > 0) {
     await client
       .from('knowledge_documents')
-      .update({ metadata: { secondary_workspaces: secondaryWorkspaces } })
+      .update({ metadata })
       .eq('id', result.documentId);
   }
 
@@ -652,4 +673,95 @@ export function estimateCost(summary: PipelineSummary): CostBreakdown {
     classifierUsd: Number(classifierUsd.toFixed(6)),
     totalUsd: Number((voyageUsd + classifierUsd).toFixed(6)),
   };
+}
+
+// ---------- Export discovery (top-level + projects/ folder) ----------
+
+export interface ExportBatch {
+  // null for the top-level conversations.json. Otherwise the project name
+  // (folder name, or the `name` field from project.json if present).
+  projectName: string | null;
+  conversations: ParsedConversation[];
+}
+
+export interface DiscoverExportOptions {
+  // Skip the top-level conversations.json; only process projects/.
+  projectsOnly?: boolean;
+  // Skip projects/ even if it exists; only process top-level.
+  skipProjects?: boolean;
+}
+
+// Walks a Claude.ai export directory and returns ordered batches:
+// the top-level conversations.json (if any), followed by one batch per
+// projects/<project_name>/conversations.json.
+//
+// The export shape used in practice:
+//   <export>/conversations.json
+//   <export>/projects/<project_name>/conversations.json
+//   <export>/projects/<project_name>/project.json   (optional, gives a name)
+//
+// Project folders without a conversations.json are skipped silently;
+// the projects/ dir being absent is also silent.
+export function discoverExport(
+  exportPath: string,
+  options: DiscoverExportOptions = {},
+): ExportBatch[] {
+  if (!existsSync(exportPath)) {
+    throw new Error(`Path does not exist: ${exportPath}`);
+  }
+  const stat = statSync(exportPath);
+  // Accept a direct path to a conversations.json: treat as a single
+  // top-level batch. No projects/ traversal in that case.
+  if (!stat.isDirectory()) {
+    if (options.projectsOnly) return [];
+    const raw = JSON.parse(readFileSync(exportPath, 'utf8'));
+    return [{ projectName: null, conversations: parseConversations(raw) }];
+  }
+
+  const out: ExportBatch[] = [];
+
+  if (!options.projectsOnly) {
+    const rootFile = join(exportPath, 'conversations.json');
+    if (existsSync(rootFile)) {
+      const raw = JSON.parse(readFileSync(rootFile, 'utf8'));
+      out.push({ projectName: null, conversations: parseConversations(raw) });
+    }
+  }
+
+  if (!options.skipProjects) {
+    const projectsDir = join(exportPath, 'projects');
+    if (existsSync(projectsDir) && statSync(projectsDir).isDirectory()) {
+      const subdirs = readdirSync(projectsDir)
+        .map((name) => ({ name, full: join(projectsDir, name) }))
+        .filter((d) => {
+          try {
+            return statSync(d.full).isDirectory();
+          } catch {
+            return false;
+          }
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      for (const d of subdirs) {
+        const convFile = join(d.full, 'conversations.json');
+        if (!existsSync(convFile)) continue;
+        let projectName = d.name;
+        const projMetaFile = join(d.full, 'project.json');
+        if (existsSync(projMetaFile)) {
+          try {
+            const meta = JSON.parse(readFileSync(projMetaFile, 'utf8')) as { name?: string };
+            if (typeof meta.name === 'string' && meta.name.trim().length > 0) {
+              projectName = meta.name.trim();
+            }
+          } catch {
+            // Malformed project.json: keep folder name as-is.
+          }
+        }
+        const raw = JSON.parse(readFileSync(convFile, 'utf8'));
+        out.push({ projectName, conversations: parseConversations(raw) });
+      }
+    }
+  }
+
+  return out;
 }
