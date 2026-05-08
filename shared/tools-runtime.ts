@@ -9,7 +9,7 @@ export interface ToolRow {
   name: string;
   description: string | null;
   input_schema: Record<string, unknown>;
-  handler_type: 'mock' | 'internal' | 'http' | 'edge_function';
+  handler_type: 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server';
   handler_config: Record<string, unknown>;
   requires_approval_default: boolean;
   is_outbound: boolean;
@@ -27,11 +27,24 @@ export async function loadAgentTools(client: SupabaseClient, _agentId: string, a
 }
 
 export function toAnthropicToolDefs(rows: ToolRow[]): AnthropicToolDef[] {
-  return rows.map((t) => ({
-    name: t.name,
-    description: t.description ?? '',
-    input_schema: t.input_schema,
-  }));
+  return rows.map((t) => {
+    if (t.handler_type === 'anthropic_server') {
+      const cfg = t.handler_config ?? {};
+      const serverType = String((cfg as Record<string, unknown>).server_tool_type ?? '');
+      const def: { type: string; name: string; max_uses?: number } = {
+        type: serverType,
+        name: t.name,
+      };
+      const maxUses = (cfg as Record<string, unknown>).max_uses;
+      if (typeof maxUses === 'number') def.max_uses = maxUses;
+      return def;
+    }
+    return {
+      name: t.name,
+      description: t.description ?? '',
+      input_schema: t.input_schema,
+    };
+  });
 }
 
 export interface ApprovalDecision {

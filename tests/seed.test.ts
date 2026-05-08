@@ -78,6 +78,12 @@ describe('seed: tools', () => {
     expect(t.isOutbound).toBe(true);
     expect(t.requiresApprovalDefault).toBe(true);
   });
+
+  it('includes web_search as an anthropic_server tool', () => {
+    const t = TOOLS.find((x) => x.name === 'web_search')!;
+    expect(t.handlerType).toBe('anthropic_server');
+    expect(t.handlerConfig.server_tool_type).toBe('web_search_20250305');
+  });
 });
 
 describe('ensureAgents: behaviour', () => {
@@ -91,6 +97,35 @@ describe('ensureAgents: behaviour', () => {
       expect(typeof a.system_prompt).toBe('string');
       expect((a.system_prompt as string).length).toBeGreaterThan(0);
       expect(a.model).toBe('claude-sonnet-4-6');
+    }
+  });
+
+  it('idempotently adds the web_search tool to existing agents on re-seed', async () => {
+    const { client, db } = fakeClient();
+    const { workspaceIds, toolIds } = seedWorkspacesAndTools(db);
+
+    // Pre-seed agents with the OLD allow-list (no web_search) to simulate
+    // a database from before this phase.
+    const legacyAllowed = ['mock_echo', 'mock_search', 'search_knowledge']
+      .map((n) => toolIds[n]!)
+      .filter(Boolean);
+    db.seedTable('agents', WORKSPACES.map((ws) => ({
+      id: randomUUID(),
+      workspace_id: workspaceIds[ws.slug]!,
+      name: `${ws.name} Assistant`,
+      role_description: 'old',
+      system_prompt: 'old',
+      model: 'claude-sonnet-4-6',
+      allowed_tool_ids: legacyAllowed,
+    })));
+
+    await ensureAgents(client, workspaceIds, toolIds);
+
+    const webSearchId = toolIds.web_search!;
+    expect(webSearchId).toBeTruthy();
+    for (const agent of db.tableRows('agents')) {
+      const allowed = agent.allowed_tool_ids as string[];
+      expect(allowed).toContain(webSearchId);
     }
   });
 

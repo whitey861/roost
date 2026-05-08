@@ -3,7 +3,7 @@
 
 export type WorkspaceApprovalMode = 'all_outbound' | 'allowlist' | 'autonomous';
 export type WorkspaceRole = 'owner' | 'admin' | 'approver' | 'member' | 'viewer';
-export type ToolHandlerType = 'mock' | 'internal' | 'http' | 'edge_function';
+export type ToolHandlerType = 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server';
 export type ChannelType = 'web' | 'telegram';
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'system_event';
 export type JobStatus = 'queued' | 'running' | 'complete' | 'failed' | 'cancelled' | 'awaiting_approval';
@@ -112,12 +112,12 @@ export interface TelegramLink {
   active: boolean;
 }
 
-// Anthropic-shaped tool definition we send to Claude.
-export interface AnthropicToolDef {
-  name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-}
+// Anthropic-shaped tool definition we send to Claude. Either a custom tool
+// (name/description/input_schema) executed by our runtime, or a server tool
+// (type/name/max_uses) executed by Anthropic.
+export type AnthropicToolDef =
+  | { name: string; description: string; input_schema: Record<string, unknown> }
+  | { type: string; name: string; max_uses?: number };
 
 // Wire format for SSE events the chat function emits.
 export type ChatStreamEvent =
