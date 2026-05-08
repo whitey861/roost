@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "aaaaaaaa-0000-0000-0000-000000000001",
+    "name": "Top-level Beacon ramp plan",
+    "created_at": "2026-04-01T10:00:00Z",
+    "updated_at": "2026-04-02T10:00:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "Top-level chat: Beacon Phase 2 sequencing for council." },
+      { "uuid": "m2", "sender": "assistant", "text": "Sequence service catalogue migration first." }
+    ]
+  }
+]

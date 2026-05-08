@@ -24,15 +24,27 @@ supabase/
     pair-telegram/             POST /pair-telegram
     _shared/                   auth, supabase client, anthropic client, runtime
 shared/                        Node-side TypeScript modules (canonical logic)
+prompts/                       per-workspace agent system prompts (markdown)
 scripts/
-  seed.ts                      idempotent seed
+  seed.ts                      idempotent seed (does NOT overwrite system_prompt)
+  sync-prompts.ts              push prompts/<slug>.md changes to the database
   set-telegram-webhook.ts      registers the bot webhook with Telegram
 tests/                         vitest suite
+.devcontainer/                 codespace config (Node 20, Deno, Supabase CLI)
 ```
 
 `shared/chat-runtime.ts` and `supabase/functions/_shared/chat-runtime.ts`
 implement the same flow. The Node copy is canonical for tests; the Deno
 copy is what runs in production. Keep them in sync.
+
+## Codespace setup
+
+`.devcontainer/devcontainer.json` provisions a working environment on every
+codespace rebuild: Node 20, Deno (via the devcontainers feature), the Supabase
+CLI, and `npm install` already done. Open the repo in a Codespace and the
+post-create command runs once, then `npm run ci` should pass without further
+setup. If `npm run typecheck:edge` complains about a missing `deno`, the
+feature did not install; rebuild the codespace.
 
 ## Local setup
 
@@ -52,6 +64,9 @@ supabase start
 npm run migrate            # supabase db reset --local
 
 # Seed workspaces, default agents, mock tools, admin user.
+# Safe to re-run: existing agents have role_description/model/allowed_tool_ids
+# refreshed but their system_prompt is preserved. Use sync-prompts to push
+# prompt changes (see "Agent system prompts" below).
 npm run seed
 
 # Run the Edge Functions locally.
@@ -101,6 +116,46 @@ To test approval gating, ask the assistant to "send an email to a@b.com
 saying hi". `mock_send_email` is outbound, so the runtime queues an
 `outbound_actions` row with `status='pending'` and the assistant tells
 you it has been queued.
+
+## Agent system prompts
+
+Each workspace's default agent has a system prompt living at
+`prompts/<workspace_slug>.md`. The file IS the prompt: no frontmatter, no
+templating. Edit it like any other markdown file.
+
+The seed script never overwrites `system_prompt` on an existing agent. That
+means manual SQL edits and prompt-file changes both stay put across re-seeds.
+Pushing prompt-file changes to the database is an explicit step:
+
+```bash
+# Sync all five workspaces' prompts.
+npm run sync-prompts
+
+# Sync just one.
+npm run sync-prompts -- --workspace pmhc
+
+# See diffs without writing.
+npm run sync-prompts -- --dry-run
+```
+
+The script reports a `before -> after words (+/- delta)` summary per agent
+and skips agents where the file already matches the database.
+
+## Default model
+
+Newly seeded agents default to `claude-sonnet-4-6`. Sonnet 4.6 is roughly 5x
+cheaper than Opus 4.7 for similar quality on the kinds of tasks Roost agents
+do (chat, summarisation, light reasoning, tool routing). To switch a specific
+agent back to Opus where the quality lift is worth the cost (long-form
+writing, deep analysis):
+
+```sql
+update agents set model = 'claude-opus-4-7' where name = 'PMHC Assistant';
+```
+
+The shipping migration `0010_default_model_sonnet.sql` updates any agent that
+was on the old default to Sonnet 4.6 idempotently; agents already pointing at
+a different model (e.g. Haiku) are left alone.
 
 ## Phase 3: Knowledge layer (RAG)
 
@@ -190,7 +245,23 @@ npm run ingest-claude-export -- --path ... --limit 10
 
 # Skip personal-classified conversations
 npm run ingest-claude-export -- --path ... --exclude-personal
+
+# Re-ingest only the projects/ subfolders (skip top-level conversations.json)
+npm run ingest-claude-export -- --path ... --projects-only
 ```
+
+A Claude.ai export contains `conversations.json` at the top, plus a
+`projects/` directory with one subfolder per Project, each holding its own
+`conversations.json` (and an optional `project.json` with the friendly name).
+The script processes the top-level batch first, then iterates the project
+folders in name order. For each conversation in a project, the project name
+is:
+
+- passed to the classifier as a strong-context line in the user prompt (a
+  Claude.ai Project usually maps cleanly to one workspace);
+- written to `knowledge_documents.metadata.project` so retrieved chunks can
+  show their origin;
+- added to the document's tags as `project:<name>`.
 
 What happens per conversation:
 

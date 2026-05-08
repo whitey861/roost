@@ -4,6 +4,7 @@ import { runChat } from '../shared/chat-runtime.js';
 import type { ChatStreamEvent } from '../shared/types.js';
 import { FakeAnthropic } from './fakes/fake-anthropic.js';
 import { FakeSupabaseClient } from './fakes/fake-supabase.js';
+import { fakeQueryEmbedder } from './fakes/fake-embedder.js';
 import { seedFakeDb } from './fixtures/seed-fake-db.js';
 
 async function collect(it: AsyncIterable<ChatStreamEvent>): Promise<ChatStreamEvent[]> {
@@ -30,6 +31,7 @@ describe('runChat: happy path with no tools', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      embedQueryFn: fakeQueryEmbedder,
     }));
 
     expect(events[0]?.type).toBe('session');
@@ -69,6 +71,7 @@ describe('runChat: mock tool call loop', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'search for roost',
+      embedQueryFn: fakeQueryEmbedder,
     }));
 
     const toolCall = events.find((e) => e.type === 'tool_call');
@@ -113,6 +116,7 @@ describe('runChat: outbound tool requires approval', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'email a@b.com hi',
+      embedQueryFn: fakeQueryEmbedder,
     }));
 
     const queued = events.find((e) => e.type === 'tool_result' && (e as { queued_for_approval?: boolean }).queued_for_approval);
@@ -138,6 +142,7 @@ describe('runChat: budget cap enforcement', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      embedQueryFn: fakeQueryEmbedder,
     }));
 
     expect(events.some((e) => e.type === 'budget_exceeded')).toBe(true);
@@ -159,9 +164,39 @@ describe('runChat: budget cap enforcement', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      embedQueryFn: fakeQueryEmbedder,
     }));
 
     expect(events.some((e) => e.type === 'budget_exceeded')).toBe(false);
     expect(events.at(-1)?.type).toBe('done');
+  });
+});
+
+describe('runChat: embedder injection', () => {
+  it('uses the injected embedder rather than calling real Voyage', async () => {
+    // If chat-runtime ignored embedQueryFn we'd see this fetch get called and
+    // the test would fail. Patching globalThis.fetch would be a backstop, but
+    // the cleanest assertion is on the injected embedder itself.
+    const fx = seedFakeDb();
+    let calls = 0;
+    const embedder = async () => { calls += 1; return Array.from({ length: 1024 }, () => 0.0); };
+    const anthropic = new FakeAnthropic([
+      { text: 'ok.', stopReason: 'end_turn', inputTokens: 1, outputTokens: 1 },
+    ]);
+
+    await collect(runChat({
+      client: client(fx.db),
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'Tell me about Beacon.',
+      embedQueryFn: embedder,
+    }));
+
+    // No knowledge RPC handler is registered, so retrieveTopK gets a null
+    // result and returns []; but the embedder MUST be called once for the
+    // user message.
+    expect(calls).toBe(1);
   });
 });

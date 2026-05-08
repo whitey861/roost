@@ -10,11 +10,17 @@ const dir = join(__dirname, '..', 'supabase', 'migrations');
 describe('migrations', () => {
   it('lists numbered SQL files in order', () => {
     const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-    expect(files.length).toBeGreaterThanOrEqual(8);
+    expect(files.length).toBeGreaterThanOrEqual(10);
     for (let i = 0; i < files.length; i++) {
       const expected = String(i + 1).padStart(4, '0');
       expect(files[i]?.startsWith(expected + '_')).toBe(true);
     }
+  });
+
+  it('default model has been switched to Sonnet 4.6', () => {
+    const all = readdirSync(dir).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n');
+    expect(all).toMatch(/alter column model set default 'claude-sonnet-4-6'/);
+    expect(all).toMatch(/update public\.agents set model = 'claude-sonnet-4-6'/);
   });
 
   it('all files use `create table if not exists` or DO blocks for idempotency', () => {

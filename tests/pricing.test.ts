@@ -8,6 +8,12 @@ describe('pricing', () => {
     expect(r.outputPerMillion).toBe(75);
   });
 
+  it('returns a known rate for sonnet 4.6 (the new default)', () => {
+    const r = getRate('claude-sonnet-4-6');
+    expect(r.inputPerMillion).toBe(3);
+    expect(r.outputPerMillion).toBe(15);
+  });
+
   it('falls back to opus rates for unknown model', () => {
     const r = getRate('not-a-real-model');
     expect(r.inputPerMillion).toBe(15);

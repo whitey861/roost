@@ -1,6 +1,10 @@
 // Roost: seed definitions for the five workspaces and their default agents.
 // `scripts/seed.ts` reads this file to populate the database.
 
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 export interface WorkspaceSeed {
   slug: string;
   name: string;
@@ -11,7 +15,8 @@ export interface AgentSeed {
   workspaceSlug: string;
   name: string;
   roleDescription: string;
-  systemPrompt: string;
+  promptFile: string;
+  model: string;
   toolNames: string[];
 }
 
@@ -43,26 +48,42 @@ export const WORKSPACES: WorkspaceSeed[] = [
   },
 ];
 
-const baseGuardrails = [
-  'You are part of Roost, a personal AI agent platform.',
-  'Be concise. Use plain Australian English.',
-  'Do not use em dashes. Prefer commas, colons, or shorter sentences.',
-  'When the user asks for an outbound action like sending an email, posting a message, or writing to an external system, propose it clearly and let the platform handle approval.',
-  'If a tool result indicates the action was queued for approval, tell the user it is queued and what they need to do.',
-].join(' ');
-
-function prompt(workspace: WorkspaceSeed): string {
-  return [
-    `You are the ${workspace.name} Assistant.`,
-    `Domain context: ${workspace.description}`,
-    baseGuardrails,
-  ].join('\n\n');
-}
+// Default model for newly seeded agents. Sonnet 4.6 covers the bulk of Roost
+// work at ~5x lower cost than Opus 4.7. Switch a specific agent back to Opus
+// only when the quality lift is worth the cost (long-form writing, deep
+// analysis):
+//   update agents set model = 'claude-opus-4-7' where name = '...';
+export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 export const AGENTS: AgentSeed[] = WORKSPACES.map((ws) => ({
   workspaceSlug: ws.slug,
   name: `${ws.name} Assistant`,
   roleDescription: `Default assistant for the ${ws.name} workspace.`,
-  systemPrompt: prompt(ws),
+  promptFile: `prompts/${ws.slug}.md`,
+  model: DEFAULT_MODEL,
   toolNames: ['mock_echo', 'mock_search', 'search_knowledge'],
 }));
+
+// Resolve a prompt file path relative to the repository root, regardless of
+// where the caller is running from. shared/agents.ts lives at <root>/shared/.
+function repoRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..');
+}
+
+export function readPromptFile(promptFile: string): string {
+  const abs = join(repoRoot(), promptFile);
+  return readFileSync(abs, 'utf8');
+}
+
+// Returns the system prompt content for an agent at seed time.
+// Throws if the prompt file is missing: a missing prompt file is a seed bug,
+// not a silent fall-back to a generic prompt.
+export function loadSystemPrompt(agent: AgentSeed): string {
+  const text = readPromptFile(agent.promptFile);
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    throw new Error(`Empty prompt file: ${agent.promptFile}`);
+  }
+  return trimmed;
+}

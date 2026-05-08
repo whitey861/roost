@@ -20,10 +20,15 @@ export interface KnowledgeHit {
   similarity: number;
 }
 
+// Single-query embedder used at retrieval time. Tests inject a deterministic
+// fake; production passes embedQuery through.
+export type QueryEmbedder = (query: string, opts?: EmbedOptions) => Promise<number[]>;
+
 export interface RetrieveOptions {
   k?: number;
   minSimilarity?: number;
   embedOptions?: EmbedOptions;
+  embedQueryFn?: QueryEmbedder;
 }
 
 // Format hits into the <workspace_knowledge> block we prepend to the
@@ -58,7 +63,8 @@ export async function retrieveTopK(
 
   let embedding: number[];
   try {
-    embedding = await embedQuery(trimmed, options.embedOptions);
+    const embed = options.embedQueryFn ?? embedQuery;
+    embedding = await embed(trimmed, options.embedOptions);
   } catch {
     // Embedding failure: fall back to no-knowledge mode rather than
     // breaking the chat. Real failures are visible in the ingest script.

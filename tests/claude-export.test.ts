@@ -5,6 +5,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   buildClassifierPrompts,
   classifyConversation,
+  discoverExport,
   extractJson,
   extractMessageText,
   ingestOneConversation,
@@ -481,5 +482,91 @@ describe('loadWorkspaceIdMap', () => {
     expect(map.pmhc).toBe(fx.workspaceIds.pmhc);
     expect(map.kca).toBe(fx.workspaceIds.kca);
     expect(map.dev).toBe(fx.workspaceIds.dev);
+  });
+});
+
+// ---------- Projects/ folder support ----------
+
+const PROJECTS_FIXTURE = join(__dirname, 'fixtures/sample-export-with-projects');
+
+describe('discoverExport', () => {
+  it('returns a single top-level batch when there is only conversations.json', () => {
+    const batches = discoverExport(join(__dirname, 'fixtures/sample-export'));
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.projectName).toBeNull();
+    expect(batches[0]?.conversations.length).toBeGreaterThan(0);
+  });
+
+  it('returns top-level + one batch per project folder, sorted by folder name', () => {
+    const batches = discoverExport(PROJECTS_FIXTURE);
+    expect(batches).toHaveLength(3);
+    expect(batches[0]?.projectName).toBeNull();
+    expect(batches[0]?.conversations[0]?.name).toBe('Top-level Beacon ramp plan');
+    // dev-deep-dive sorts before koala-fundraising; project.json overrides folder name.
+    expect(batches[1]?.projectName).toBe('Dev deep-dive');
+    expect(batches[1]?.conversations).toHaveLength(2);
+    expect(batches[2]?.projectName).toBe('koala-fundraising');
+    expect(batches[2]?.conversations).toHaveLength(1);
+  });
+
+  it('respects --projects-only by skipping the top-level batch', () => {
+    const batches = discoverExport(PROJECTS_FIXTURE, { projectsOnly: true });
+    expect(batches).toHaveLength(2);
+    for (const b of batches) expect(b.projectName).not.toBeNull();
+  });
+});
+
+describe('buildClassifierPrompts: with project name', () => {
+  it('embeds the project name as a strong-context line', () => {
+    const conv: ParsedConversation = {
+      uuid: 'p',
+      name: 't',
+      created_at: null,
+      updated_at: null,
+      messages: [
+        { uuid: '1', sender: 'human', text: 'hello', created_at: null },
+      ],
+    };
+    const { userPrompt } = buildClassifierPrompts(conv, { projectName: 'Roost Build' });
+    expect(userPrompt).toContain('Project: Roost Build');
+    expect(userPrompt).toContain('strong context');
+  });
+});
+
+describe('ingestOneConversation: project metadata', () => {
+  it('stamps metadata.project and adds a project: tag when projectName is set', async () => {
+    const fx = clientWithWorkspaces();
+    const conv = loadFixture().find((c) => c.name === 'Beacon platform Q3 plan')!;
+    const classify = fixedClassifierByTitle(FIXTURE_CLASSIFICATIONS);
+    const r = await ingestOneConversation(
+      fx.client,
+      fakeEmbed,
+      classify,
+      fx.workspaceIds,
+      conv,
+      { projectName: 'Beacon Build' },
+    );
+    expect(r.outcome).toBe('ingested');
+    const doc = fx.db.tableRows('knowledge_documents')[0]!;
+    const meta = doc.metadata as Record<string, unknown>;
+    expect(meta.project).toBe('Beacon Build');
+    expect((doc.tags as string[]).some((t) => String(t).includes('project:Beacon Build'))).toBe(true);
+  });
+
+  it('passes projectName into the classifier user prompt', async () => {
+    const fx = clientWithWorkspaces();
+    const conv = loadFixture().find((c) => c.name === 'Beacon platform Q3 plan')!;
+    let observedPrompt = '';
+    const classify: Classifier = async ({ userPrompt }) => {
+      observedPrompt = userPrompt;
+      return {
+        text: '{"workspace":"pmhc","confidence":0.9,"reasoning":"x"}',
+        usage: { inputTokens: 100, outputTokens: 20 },
+      };
+    };
+    await ingestOneConversation(fx.client, fakeEmbed, classify, fx.workspaceIds, conv, {
+      projectName: 'Beacon Build',
+    });
+    expect(observedPrompt).toContain('Project: Beacon Build');
   });
 });

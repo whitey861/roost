@@ -7,7 +7,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
-import { WORKSPACES, AGENTS } from '../shared/agents.js';
+import { WORKSPACES, AGENTS, loadSystemPrompt } from '../shared/agents.js';
 import { TOOLS } from '../shared/tools.js';
 
 loadEnv();
@@ -115,7 +115,7 @@ async function ensureTools(client: SupabaseClient): Promise<Record<string, strin
   return nameToId;
 }
 
-async function ensureAgents(
+export async function ensureAgents(
   client: SupabaseClient,
   workspaceIds: Record<string, string>,
   toolIds: Record<string, string>,
@@ -137,26 +137,30 @@ async function ensureAgents(
     if (lookupErr) throw new Error(`agent lookup failed: ${lookupErr.message}`);
 
     if (existing) {
+      // Do NOT touch system_prompt on update. Manual SQL edits and prompts
+      // pushed via `npm run sync-prompts` must survive a re-seed.
       const { error } = await client
         .from('agents')
         .update({
           role_description: a.roleDescription,
-          system_prompt: a.systemPrompt,
+          model: a.model,
           allowed_tool_ids: allowedToolIds,
         })
         .eq('id', existing.id);
       if (error) throw new Error(`agent update failed: ${error.message}`);
-      console.log(`Agent ${a.name}: updated`);
+      console.log(`Agent ${a.name}: updated (system_prompt preserved)`);
     } else {
+      const systemPrompt = loadSystemPrompt(a);
       const { error } = await client.from('agents').insert({
         workspace_id: wsId,
         name: a.name,
         role_description: a.roleDescription,
-        system_prompt: a.systemPrompt,
+        system_prompt: systemPrompt,
+        model: a.model,
         allowed_tool_ids: allowedToolIds,
       });
       if (error) throw new Error(`agent insert failed: ${error.message}`);
-      console.log(`Agent ${a.name}: created`);
+      console.log(`Agent ${a.name}: created from ${a.promptFile}`);
     }
   }
 }
@@ -180,7 +184,21 @@ async function main(): Promise<void> {
   console.log(`Admin password: ${ADMIN_PASSWORD}`);
 }
 
-main().catch((err) => {
-  console.error('Seed failed:', err);
-  process.exit(1);
-});
+// Run main() only when invoked as a CLI. Importing this file from tests
+// (to exercise ensureAgents directly) must NOT trigger the live seed.
+import { fileURLToPath } from 'node:url';
+
+const isCli = (() => {
+  try {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (isCli) {
+  main().catch((err) => {
+    console.error('Seed failed:', err);
+    process.exit(1);
+  });
+}
