@@ -224,10 +224,21 @@ export class FakeDb {
   }
 }
 
+export type RpcHandler = (args: Record<string, unknown>) => Promise<{ data: unknown; error: PgError | null }>;
+
 export class FakeSupabaseClient {
+  private rpcHandlers = new Map<string, RpcHandler>();
   constructor(public readonly db: FakeDb) {}
   from(table: string): QueryBuilder {
     return new QueryBuilder(this.db, table);
+  }
+  registerRpc(name: string, handler: RpcHandler): void {
+    this.rpcHandlers.set(name, handler);
+  }
+  rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: PgError | null }> {
+    const h = this.rpcHandlers.get(name);
+    if (!h) return Promise.resolve({ data: null, error: { message: `No RPC handler: ${name}` } });
+    return h(args);
   }
 }
 

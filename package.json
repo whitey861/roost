@@ -13,6 +13,8 @@
     "test:watch": "vitest",
     "ci": "npm run check:parity && npm run typecheck && npm run typecheck:edge && npm test",
     "seed": "tsx scripts/seed.ts",
+    "ingest": "tsx scripts/ingest.ts",
+    "reindex": "tsx scripts/reindex.ts",
     "set-webhook": "tsx scripts/set-telegram-webhook.ts",
     "migrate": "supabase db reset --local",
     "migrate:push": "supabase db push",

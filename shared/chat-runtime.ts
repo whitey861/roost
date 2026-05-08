@@ -12,6 +12,7 @@ import { approvalRequired, loadAgentTools, toAnthropicToolDefs, type ToolRow } f
 import { runMockTool } from './tools.js';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.js';
 import { costUsd } from './pricing.js';
+import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit } from './retrieval.js';
 
 // SHARED_RUNTIME_START
 
@@ -226,6 +227,21 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 
   await persistUserMessage(client, sessionId, params.userMessage);
 
+  // Knowledge auto-injection: retrieve top hits relevant to the user's
+  // message and prepend them to the system prompt for this run.
+  // retrieveTopK no-ops gracefully when Voyage isn't configured or when
+  // no chunks meet the similarity threshold.
+  let knowledgeHits: KnowledgeHit[] = [];
+  try {
+    knowledgeHits = await retrieveTopK(client, workspace.id, params.userMessage, 4, 0.4);
+  } catch {
+    knowledgeHits = [];
+  }
+  const knowledgeContext = knowledgeHits.length > 0 ? formatKnowledgeBlock(knowledgeHits) : '';
+  const effectiveSystemPrompt = knowledgeContext.length > 0
+    ? `${knowledgeContext}\n\n${agent.system_prompt}`
+    : agent.system_prompt;
+
   const history = await loadHistory(client, sessionId);
   const messages: AnthropicMessage[] = [...history];
   if (messages.length === 0 || messages[messages.length - 1]?.role !== 'user') {
@@ -248,7 +264,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 
     const req: StreamRequest = {
       model: agent.model,
-      systemPrompt: agent.system_prompt,
+      systemPrompt: effectiveSystemPrompt,
       messages: [...messages],
       tools: toolDefs,
       maxTokens: 1024,
@@ -341,7 +357,14 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 
       let out: Record<string, unknown>;
       try {
-        out = runMockTool(tu.name, tu.input);
+        if (toolRow.handler_type === 'internal' && tu.name === 'search_knowledge') {
+          const q = String(tu.input.query ?? '');
+          const max = Math.min(10, Math.max(1, Number(tu.input.max_results ?? 5)));
+          const hits = await retrieveTopK(client, workspace.id, q, max, 0.3);
+          out = { hits };
+        } else {
+          out = runMockTool(tu.name, tu.input);
+        }
       } catch (err) {
         out = { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
