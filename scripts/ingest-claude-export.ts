@@ -101,6 +101,9 @@ function printSummary(summary: PipelineSummary, dryRun: boolean): void {
   if (summary.skippedExisting > 0) {
     console.log(pad('already ingested', 18) + pad(summary.skippedExisting, 16, true) + pad('-', 12, true) + pad('-', 14, true) + pad('-', 14, true));
   }
+  if (summary.errors > 0) {
+    console.log(pad('errors', 18) + pad(summary.errors, 16, true) + pad('-', 12, true) + pad('-', 14, true) + pad('-', 14, true));
+  }
   console.log('-'.repeat(74));
   console.log(
     pad('Total ingested', 18)
@@ -133,6 +136,8 @@ function reportLine(r: ConversationRunReport): string {
       return `[classify] ${r.title} → ${ws} (confidence ${conf})`;
     case 'ingested':
       return `[ingest] ${r.title} → ${ws}: ${r.result?.chunkCount ?? 0} chunks (confidence ${conf})`;
+    case 'error':
+      return `[error] ${r.title} → ${ws}: ${r.error ?? 'unknown error'}`;
   }
 }
 

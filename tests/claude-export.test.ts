@@ -401,6 +401,54 @@ describe('ingestOneConversation', () => {
     expect(r.outcome).toBe('ingested-dry');
     expect(fx.db.tableRows('knowledge_documents')).toHaveLength(0);
   });
+
+  it('high-confidence single-workspace classification does not flip to none', async () => {
+    // The user-stated invariant: budget@0.95 with default threshold 0.5
+    // must surface as workspace=budget end-to-end.
+    const fx = clientWithWorkspaces();
+    const conv = loadFixture().find((c) => c.name === 'Foster care meal plan')!; // generic body, classifier decides
+    const classify: Classifier = async () => ({
+      text: '{"workspace":"budget","confidence":0.95,"reasoning":"household finances and Float app"}',
+      usage: { inputTokens: 100, outputTokens: 30 },
+    });
+    const r = await ingestOneConversation(fx.client, fakeEmbed, classify, fx.workspaceIds, conv, {});
+    expect(r.outcome).toBe('ingested');
+    expect(r.workspaceSlug).toBe('budget');
+    expect(r.classification?.workspace).toBe('budget');
+  });
+
+  it('dry-run with empty workspaceIds still surfaces high-confidence classifications', async () => {
+    // Reproduces the live bug: in --dry-run the CLI passes an empty
+    // workspaceIds map (no DB connection), so the slug→id lookup
+    // fails and the conversation is wrongly reported as skip-none.
+    // A budget@0.95 classification must come through as ingested-dry.
+    const fx = clientWithWorkspaces();
+    const conv = loadFixture().find((c) => c.name === 'Foster care meal plan')!;
+    const classify: Classifier = async () => ({
+      text: '{"workspace":"budget","confidence":0.95,"reasoning":"household finances and Float app"}',
+      usage: { inputTokens: 100, outputTokens: 30 },
+    });
+    const r = await ingestOneConversation(fx.client, fakeEmbed, classify, {}, conv, { dryRun: true });
+    expect(r.outcome).toBe('ingested-dry');
+    expect(r.workspaceSlug).toBe('budget');
+    expect(r.classification?.workspace).toBe('budget');
+  });
+
+  it('non-dry-run with an unknown workspace slug returns an error outcome (not skip-none)', async () => {
+    const fx = clientWithWorkspaces();
+    const conv = loadFixture().find((c) => c.name === 'Foster care meal plan')!;
+    const classify: Classifier = async () => ({
+      text: '{"workspace":"budget","confidence":0.95,"reasoning":"x"}',
+      usage: { inputTokens: 100, outputTokens: 30 },
+    });
+    // Strip 'budget' from the workspace map to simulate an unseeded DB.
+    const partial = { ...fx.workspaceIds };
+    delete (partial as Record<string, string>).budget;
+    const r = await ingestOneConversation(fx.client, fakeEmbed, classify, partial, conv, {});
+    expect(r.outcome).toBe('error');
+    expect(r.error).toContain('budget');
+    expect(fx.db.tableRows('knowledge_documents')).toHaveLength(0);
+  });
 });
 
 describe('summarise + estimateCost', () => {

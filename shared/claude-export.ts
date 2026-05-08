@@ -416,7 +416,7 @@ export interface IngestPipelineOptions {
 export interface ConversationRunReport {
   uuid: string;
   title: string;
-  outcome: 'skip-existing' | 'skip-none' | 'skip-low-confidence' | 'skip-personal-excluded' | 'ingested-dry' | 'ingested';
+  outcome: 'skip-existing' | 'skip-none' | 'skip-low-confidence' | 'skip-personal-excluded' | 'ingested-dry' | 'ingested' | 'error';
   classification?: WorkspaceClassification;
   workspaceSlug?: string;
   result?: IngestResult;
@@ -428,6 +428,7 @@ export interface PipelineSummary {
   byWorkspace: Record<string, { conversations: number; chunks: number; tokens: number }>;
   skippedNone: number;
   skippedExisting: number;
+  errors: number;
   classifierInputTokens: number;
   classifierOutputTokens: number;
   totalIngestedConversations: number;
@@ -498,18 +499,13 @@ export async function ingestOneConversation(
     };
   }
 
-  const workspaceId = workspaceIds[workspaceSlug];
-  if (!workspaceId) {
-    return {
-      uuid: conv.uuid,
-      title: conv.name,
-      outcome: 'skip-none',
-      classification,
-      classifierUsage,
-      error: `Unknown workspace slug "${workspaceSlug}". Run npm run seed first.`,
-    };
-  }
-
+  // Dry-run reports the classification without touching the DB. The
+  // workspaceId lookup runs AFTER this so that --dry-run works without
+  // a Supabase connection (and therefore without a populated workspace
+  // map). Reordering this guard fixed a regression where every
+  // dry-run conversation was reported as skip-none because the empty
+  // workspaceIds map made the slug lookup fail before the dry-run
+  // early-return.
   if (opts.dryRun) {
     return {
       uuid: conv.uuid,
@@ -518,6 +514,19 @@ export async function ingestOneConversation(
       classification,
       workspaceSlug,
       classifierUsage,
+    };
+  }
+
+  const workspaceId = workspaceIds[workspaceSlug];
+  if (!workspaceId) {
+    return {
+      uuid: conv.uuid,
+      title: conv.name,
+      outcome: 'error',
+      classification,
+      workspaceSlug,
+      classifierUsage,
+      error: `Unknown workspace slug "${workspaceSlug}". Run npm run seed first.`,
     };
   }
 
@@ -580,6 +589,7 @@ export function summarise(reports: ConversationRunReport[]): PipelineSummary {
     byWorkspace: {},
     skippedNone: 0,
     skippedExisting: 0,
+    errors: 0,
     classifierInputTokens: 0,
     classifierOutputTokens: 0,
     totalIngestedConversations: 0,
@@ -598,6 +608,10 @@ export function summarise(reports: ConversationRunReport[]): PipelineSummary {
     }
     if (r.outcome === 'skip-none' || r.outcome === 'skip-low-confidence' || r.outcome === 'skip-personal-excluded') {
       summary.skippedNone += 1;
+      continue;
+    }
+    if (r.outcome === 'error') {
+      summary.errors += 1;
       continue;
     }
     if (r.outcome === 'ingested' || r.outcome === 'ingested-dry') {
