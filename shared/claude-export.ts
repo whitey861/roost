@@ -141,11 +141,17 @@ Workspaces:
 - none: not relevant to any workspace (general knowledge, unrelated topics, one-off questions)
 - multiple: spans more than one workspace clearly
 
-Respond with JSON only:
+Confidence calibration:
+- 0.85-1.0: clear, unambiguous fit. The conversation explicitly mentions a system, person, project, or term that belongs to one workspace (e.g. "Beacon" or "Civica" → pmhc; "Guulabaa" or "koala hospital" → kca; "Float app" or "savings buckets" → budget; "Vox", "Vigil", "Roost", "Lovable" → dev).
+- 0.5-0.85: probable fit, topic implied but not explicit.
+- below 0.5: weak fit; prefer "none".
+
+When in doubt between a specific workspace and "none", prefer the specific workspace if any clear keyword matches above. Reserve "none" for genuinely unrelated content (general trivia, off-topic Q&A).
+
+Output format: return RAW JSON only. No markdown code fences. No prose before or after. The required JSON shape is:
 { "workspace": "pmhc" | "kca" | "personal" | "budget" | "dev" | "none" | "multiple", "confidence": 0.0-1.0, "reasoning": "1-sentence reason" }
 
-For "multiple", also include "workspaces": ["...","..."] and "primary": "<one of the workspaces>".
-Do not include any text outside the JSON object.`;
+For "multiple", also include "workspaces": ["...","..."] and "primary": "<one of the workspaces>".`;
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
@@ -163,23 +169,69 @@ export function buildClassifierPrompts(conv: ParsedConversation): { systemPrompt
   return { systemPrompt: CLASSIFIER_SYSTEM_PROMPT, userPrompt };
 }
 
-// Defensive JSON extractor: tolerates markdown code fences and stray
-// prose around the JSON object.
+// Defensive JSON extractor: tolerates markdown code fences, surrounding
+// prose, and a missing trailing '}' when the model was cut off by
+// max_tokens.
 export function extractJson(text: string): unknown | null {
   const trimmed = text.trim();
   // Strip ```json ... ``` fence if present.
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   const candidate = fenceMatch ? fenceMatch[1]! : trimmed;
-  // Find the first '{' and the last '}' to handle leading/trailing prose.
-  const i = candidate.indexOf('{');
-  const j = candidate.lastIndexOf('}');
-  if (i === -1 || j === -1 || j < i) return null;
-  const slice = candidate.slice(i, j + 1);
+
+  const start = candidate.indexOf('{');
+  if (start === -1) return null;
+
+  // Try the cheapest path first: last '}' encloses the JSON.
+  const lastClose = candidate.lastIndexOf('}');
+  if (lastClose > start) {
+    const slice = candidate.slice(start, lastClose + 1);
+    try {
+      return JSON.parse(slice);
+    } catch {
+      // fall through
+    }
+  }
+
+  // Walk forward and find the matching close brace, respecting strings.
+  // Useful when the response has trailing prose like "}\n\nThat's it.".
+  const matched = matchBalancedObject(candidate, start);
+  if (matched) {
+    try {
+      return JSON.parse(matched);
+    } catch {
+      // fall through
+    }
+  }
+
+  // Last resort: model was truncated. Try appending a '}'.
+  const tail = lastClose > start ? candidate.slice(start, lastClose + 1) : candidate.slice(start);
   try {
-    return JSON.parse(slice);
+    return JSON.parse(tail + '}');
   } catch {
     return null;
   }
+}
+
+function matchBalancedObject(s: string, startIdx: number): string | null {
+  let depth = 0;
+  let inString: '"' | "'" | null = null;
+  let escape = false;
+  for (let i = startIdx; i < s.length; i++) {
+    const ch = s[i]!;
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = ch as '"' | "'"; continue; }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return s.slice(startIdx, i + 1);
+    }
+  }
+  return null;
 }
 
 function isValidWorkspace(v: unknown): v is (typeof VALID_WORKSPACES)[number] {
@@ -214,12 +266,43 @@ export interface ClassifyResult {
   usage: ClassifierUsage;
 }
 
+function readEnv(key: string): string | undefined {
+  // deno-lint-ignore no-explicit-any
+  const env = (globalThis as any).process?.env;
+  if (env?.[key]) return env[key] as string;
+  // deno-lint-ignore no-explicit-any
+  const denoEnv = (globalThis as any).Deno?.env;
+  if (denoEnv?.get) {
+    const v = denoEnv.get(key);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+function debugLog(label: string, payload: Record<string, unknown>): void {
+  if (readEnv('ROOST_DEBUG_CLASSIFIER') !== '1') return;
+  const tag = `[classifier:debug] ${label}`;
+  // Pretty-print so a human can scan it. Keep behind the env flag so a
+  // production run isn't drowned in noise.
+  // deno-lint-ignore no-explicit-any
+  ((globalThis as any).console?.log ?? (() => undefined))(tag, JSON.stringify(payload, null, 2));
+}
+
+function defaultThreshold(): number {
+  const fromEnv = readEnv('ROOST_CLASSIFIER_MIN_CONFIDENCE');
+  if (fromEnv !== undefined) {
+    const n = Number(fromEnv);
+    if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+  }
+  return 0.5;
+}
+
 export async function classifyConversation(
   conv: ParsedConversation,
   classifier: Classifier,
   options: { lowConfidenceThreshold?: number } = {},
 ): Promise<ClassifyResult> {
-  const threshold = options.lowConfidenceThreshold ?? 0.5;
+  const threshold = options.lowConfidenceThreshold ?? defaultThreshold();
   const { systemPrompt, userPrompt } = buildClassifierPrompts(conv);
   let lastUsage: ClassifierUsage = { inputTokens: 0, outputTokens: 0 };
 
@@ -228,15 +311,26 @@ export async function classifyConversation(
     lastUsage = { inputTokens: lastUsage.inputTokens + usage.inputTokens, outputTokens: lastUsage.outputTokens + usage.outputTokens };
     const json = extractJson(text);
     const parsed = parseClassification(json);
+    debugLog('attempt', {
+      title: conv.name,
+      uuid: conv.uuid,
+      attempt: attempt + 1,
+      raw_response: text,
+      extracted_json: json,
+      parsed,
+      threshold,
+    });
     if (parsed) {
       // Treat low confidence as none, but keep multiple as-is (it has its
       // own confidence semantics).
       if (parsed.workspace !== 'none' && parsed.workspace !== 'multiple') {
         if (parsed.confidence < threshold) {
-          return {
-            classification: { workspace: 'none', reasoning: `low confidence (${parsed.confidence.toFixed(2)}) for ${parsed.workspace}` },
-            usage: lastUsage,
+          const flipped: WorkspaceClassification = {
+            workspace: 'none',
+            reasoning: `low confidence (${parsed.confidence.toFixed(2)}) for ${parsed.workspace}: ${parsed.reasoning ?? ''}`.trim(),
           };
+          debugLog('threshold-flip', { title: conv.name, original: parsed, flipped, threshold });
+          return { classification: flipped, usage: lastUsage };
         }
       }
       return { classification: parsed, usage: lastUsage };
@@ -259,11 +353,15 @@ export interface AnthropicClassifierOptions {
   fetchImpl?: typeof fetch;
 }
 
+// Assistant-message prefill that forces the model to emit raw JSON. Claude
+// continues from the open-brace, so the response is the rest of the JSON
+// object. We prepend the prefill back when reading the completion so the
+// caller sees a complete, parseable JSON string.
+const JSON_PREFILL = '{';
+
 export function makeAnthropicClassifier(opts: AnthropicClassifierOptions = {}): Classifier {
-  // deno-lint-ignore no-explicit-any
-  const env = (globalThis as any).process?.env ?? {};
-  const apiKey = opts.apiKey ?? env.ANTHROPIC_API_KEY;
-  const model = opts.model ?? env.CLAUDE_CLASSIFIER_MODEL ?? 'claude-haiku-4-5-20251001';
+  const apiKey = opts.apiKey ?? readEnv('ANTHROPIC_API_KEY');
+  const model = opts.model ?? readEnv('CLAUDE_CLASSIFIER_MODEL') ?? 'claude-haiku-4-5-20251001';
   const fetchImpl = opts.fetchImpl ?? fetch;
 
   return async ({ systemPrompt, userPrompt }) => {
@@ -279,7 +377,10 @@ export function makeAnthropicClassifier(opts: AnthropicClassifierOptions = {}): 
         model,
         max_tokens: 256,
         system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
+        messages: [
+          { role: 'user', content: userPrompt },
+          { role: 'assistant', content: JSON_PREFILL },
+        ],
       }),
     });
     if (!res.ok) {
@@ -290,10 +391,12 @@ export function makeAnthropicClassifier(opts: AnthropicClassifierOptions = {}): 
       content?: Array<{ type: string; text?: string }>;
       usage?: { input_tokens?: number; output_tokens?: number };
     };
-    const text = (json.content ?? [])
+    const completion = (json.content ?? [])
       .filter((b) => b.type === 'text')
       .map((b) => b.text ?? '')
       .join('');
+    // Stitch the prefill back so extractJson sees a full JSON object.
+    const text = JSON_PREFILL + completion;
     const usage: ClassifierUsage = {
       inputTokens: json.usage?.input_tokens ?? 0,
       outputTokens: json.usage?.output_tokens ?? 0,

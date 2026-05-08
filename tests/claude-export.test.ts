@@ -9,6 +9,7 @@ import {
   extractMessageText,
   ingestOneConversation,
   loadWorkspaceIdMap,
+  makeAnthropicClassifier,
   parseConversations,
   renderConversationMarkdown,
   summarise,
@@ -128,9 +129,21 @@ describe('extractJson', () => {
   it('parses JSON surrounded by prose', () => {
     expect(extractJson('Sure, here:\n{"a":1}\n.')).toEqual({ a: 1 });
   });
+  it('parses JSON when followed by trailing prose', () => {
+    expect(extractJson('{"workspace":"pmhc"}\n\nThat is the classification.')).toEqual({ workspace: 'pmhc' });
+  });
+  it('handles nested objects with trailing prose using balanced matching', () => {
+    expect(extractJson('{"a":1,"b":{"c":2}} more text')).toEqual({ a: 1, b: { c: 2 } });
+  });
+  it('recovers when the model was truncated mid-object (no closing brace)', () => {
+    expect(extractJson('{"workspace":"pmhc","confidence":0.9,"reasoning":"x"')).toEqual({
+      workspace: 'pmhc',
+      confidence: 0.9,
+      reasoning: 'x',
+    });
+  });
   it('returns null on garbage', () => {
     expect(extractJson('not json')).toBeNull();
-    expect(extractJson('{"a":')).toBeNull();
   });
 });
 
@@ -185,6 +198,89 @@ describe('classifyConversation', () => {
     expect(c.classification.workspace).toBe('none');
     expect(calls).toBe(2);
     expect(c.usage.inputTokens).toBe(20);
+  });
+
+  it('preserves the model reasoning when threshold flips to none', async () => {
+    const c = await classifyConversation(conv, classifierFor('{"workspace":"pmhc","confidence":0.4,"reasoning":"council Beacon"}'));
+    expect(c.classification.workspace).toBe('none');
+    if (c.classification.workspace === 'none') {
+      expect(c.classification.reasoning).toContain('low confidence');
+      expect(c.classification.reasoning).toContain('pmhc');
+      expect(c.classification.reasoning).toContain('council Beacon');
+    }
+  });
+
+  it('honours ROOST_CLASSIFIER_MIN_CONFIDENCE override', async () => {
+    const old = process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE;
+    process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE = '0.3';
+    try {
+      const c = await classifyConversation(conv, classifierFor('{"workspace":"pmhc","confidence":0.4,"reasoning":"x"}'));
+      expect(c.classification.workspace).toBe('pmhc');
+    } finally {
+      if (old === undefined) delete process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE;
+      else process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE = old;
+    }
+  });
+
+  it('honours an explicit lowConfidenceThreshold option (overrides env)', async () => {
+    const old = process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE;
+    process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE = '0.9';
+    try {
+      const c = await classifyConversation(
+        conv,
+        classifierFor('{"workspace":"pmhc","confidence":0.4,"reasoning":"x"}'),
+        { lowConfidenceThreshold: 0.3 },
+      );
+      expect(c.classification.workspace).toBe('pmhc');
+    } finally {
+      if (old === undefined) delete process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE;
+      else process.env.ROOST_CLASSIFIER_MIN_CONFIDENCE = old;
+    }
+  });
+});
+
+describe('makeAnthropicClassifier', () => {
+  const liveConv: ParsedConversation = {
+    uuid: 'live',
+    name: 'Beacon work',
+    created_at: null,
+    updated_at: null,
+    messages: [
+      { uuid: 'a', sender: 'human', text: 'Beacon council planning', created_at: null },
+      { uuid: 'b', sender: 'assistant', text: 'Sure, here is the plan', created_at: null },
+    ],
+  };
+
+  it('uses assistant prefill `{` and stitches it back so extractJson sees full JSON', async () => {
+    let captured: { body: { messages: Array<{ role: string; content: string }> } } | null = null;
+    const fakeFetch = (async (_url: unknown, init?: { body?: unknown }) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      captured = { body };
+      // Anthropic returns just the completion AFTER the prefill.
+      const completion = '"workspace":"pmhc","confidence":0.9,"reasoning":"council"}';
+      return new Response(JSON.stringify({
+        content: [{ type: 'text', text: completion }],
+        usage: { input_tokens: 100, output_tokens: 30 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const classifier = makeAnthropicClassifier({ apiKey: 'k', fetchImpl: fakeFetch });
+    const out = await classifier({ systemPrompt: 'sys', userPrompt: 'usr' });
+    expect(captured!.body.messages).toHaveLength(2);
+    expect(captured!.body.messages[1]).toEqual({ role: 'assistant', content: '{' });
+    // Reconstructed text is parseable JSON.
+    expect(JSON.parse(out.text)).toEqual({ workspace: 'pmhc', confidence: 0.9, reasoning: 'council' });
+    expect(out.usage).toEqual({ inputTokens: 100, outputTokens: 30 });
+  });
+
+  it('end-to-end classifyConversation with the live shape returns the workspace', async () => {
+    const fakeFetch = (async () => new Response(JSON.stringify({
+      content: [{ type: 'text', text: '"workspace":"kca","confidence":0.92,"reasoning":"Guulabaa"}' }],
+      usage: { input_tokens: 80, output_tokens: 25 },
+    }), { status: 200 })) as unknown as typeof fetch;
+    const classifier = makeAnthropicClassifier({ apiKey: 'k', fetchImpl: fakeFetch });
+    const c = await classifyConversation(liveConv, classifier);
+    expect(c.classification.workspace).toBe('kca');
   });
 });
 

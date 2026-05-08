@@ -215,6 +215,25 @@ embedding cost (Voyage) and classifier cost (Haiku).
 Re-running the script without `--force` is idempotent: already-ingested
 conversations are detected by their UUID and skipped.
 
+Tuning knobs (env vars):
+
+- `CLAUDE_CLASSIFIER_MODEL` (default `claude-haiku-4-5-20251001`):
+  pick a different classifier if you want more accuracy at higher cost.
+- `ROOST_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`): conversations
+  classified with confidence below this are remapped to `none`.
+  Lower it (e.g. `0.3`) if Haiku is conservative and legitimate
+  classifications are getting flipped.
+- `ROOST_DEBUG_CLASSIFIER=1`: dumps the raw classifier response,
+  the extracted JSON, the parsed classification, and any
+  threshold flips for every conversation. Use this whenever
+  classifications look wrong; the output explains exactly what
+  the model returned.
+
+The live classifier uses Anthropic's assistant-prefill technique
+(starts the assistant message with `{`) to force pure JSON output,
+so markdown fences and stray prose around the JSON shouldn't
+happen in practice; the parser also tolerates them as a backstop.
+
 Cost guide: classifier is ~$0.0006 per conversation (Haiku 4.5);
 embedding is dominated by long conversations and chunked at ~600
 tokens. For ~300 conversations expect ~$0.20 total.
