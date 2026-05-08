@@ -16,6 +16,13 @@ function client(db: ReturnType<typeof seedFakeDb>['db']): SupabaseClient {
   return new FakeSupabaseClient(db) as unknown as SupabaseClient;
 }
 
+// Fail-fast fetch stub: any embedding call returns 400 (non-retriable),
+// retrieveTopK catches the throw and returns []. Belt-and-braces in
+// case VOYAGE_API_KEY ever leaks into the test environment; the
+// vitest setup file also unsets it.
+const noNetworkFetch: typeof fetch = (async () => new Response('blocked in tests', { status: 400 })) as unknown as typeof fetch;
+const noRetrieval = { embedOptions: { apiKey: 'test', fetchImpl: noNetworkFetch } };
+
 describe('runChat: happy path with no tools', () => {
   it('streams tokens and emits a done event', async () => {
     const fx = seedFakeDb();
@@ -30,6 +37,7 @@ describe('runChat: happy path with no tools', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      retrievalOptions: noRetrieval,
     }));
 
     expect(events[0]?.type).toBe('session');
@@ -69,6 +77,7 @@ describe('runChat: mock tool call loop', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'search for roost',
+      retrievalOptions: noRetrieval,
     }));
 
     const toolCall = events.find((e) => e.type === 'tool_call');
@@ -113,6 +122,7 @@ describe('runChat: outbound tool requires approval', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'email a@b.com hi',
+      retrievalOptions: noRetrieval,
     }));
 
     const queued = events.find((e) => e.type === 'tool_result' && (e as { queued_for_approval?: boolean }).queued_for_approval);
@@ -138,6 +148,7 @@ describe('runChat: budget cap enforcement', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      retrievalOptions: noRetrieval,
     }));
 
     expect(events.some((e) => e.type === 'budget_exceeded')).toBe(true);
@@ -159,6 +170,7 @@ describe('runChat: budget cap enforcement', () => {
       userId: fx.userId,
       channel: 'web',
       userMessage: 'Hi',
+      retrievalOptions: noRetrieval,
     }));
 
     expect(events.some((e) => e.type === 'budget_exceeded')).toBe(false);

@@ -1,0 +1,23 @@
+{
+  "name": "Roost backend",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "features": {
+    "ghcr.io/devcontainers-extra/features/deno:1": {}
+  },
+  "postCreateCommand": "npm install && mkdir -p $HOME/.local/bin && curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz | tar -xz -C $HOME/.local/bin && chmod +x $HOME/.local/bin/supabase",
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:${containerEnv:HOME}/.local/bin"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "editor.formatOnSave": false,
+        "typescript.tsdk": "node_modules/typescript/lib"
+      },
+      "extensions": [
+        "denoland.vscode-deno",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

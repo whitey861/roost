@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "ci": "npm run check:parity && npm run typecheck && npm run typecheck:edge && npm test",
     "seed": "tsx scripts/seed.ts",
+    "sync-prompts": "tsx scripts/sync-prompts.ts",
     "ingest": "tsx scripts/ingest.ts",
     "ingest-claude-export": "tsx scripts/ingest-claude-export.ts",
     "reindex": "tsx scripts/reindex.ts",

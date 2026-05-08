@@ -190,7 +190,18 @@ npm run ingest-claude-export -- --path ... --limit 10
 
 # Skip personal-classified conversations
 npm run ingest-claude-export -- --path ... --exclude-personal
+
+# Skip top-level conversations.json, only process projects/<name>/...
+npm run ingest-claude-export -- --path ... --projects-only
 ```
+
+The script walks both `conversations.json` at the export root and any
+`projects/<project_name>/conversations.json` subfolders. Conversations
+sourced from a project subfolder are tagged with
+`metadata.project = <project_name>` on the `knowledge_documents` row,
+the project name is included in the rendered markdown header, and the
+classifier prompt receives it as a strong context hint. If `projects/`
+is missing, only the top-level file is processed.
 
 What happens per conversation:
 
@@ -337,6 +348,56 @@ The suite covers:
 
 The tests use a Node-level fake of `SupabaseClient` (`tests/fakes/`) and
 a scripted fake of `AnthropicClient`. No real API calls are made.
+
+## Codespace setup (devcontainer)
+
+`.devcontainer/devcontainer.json` provisions everything `npm run ci`
+needs: Node 20, Deno (via the devcontainers feature), the Supabase CLI
+(downloaded into `~/.local/bin` on create), and a `npm install`. After
+a Codespace rebuild every CI step works without further setup.
+
+## Agent prompts and the seed contract
+
+System prompts live as plain markdown in `prompts/<slug>.md`, one
+file per workspace. The seed reads them on agent creation only.
+
+- `npm run seed` is safe to re-run. On INSERT it reads the matching
+  prompt file and writes it to the new agent. On UPDATE it
+  deliberately skips `system_prompt` and only touches
+  `role_description`, `allowed_tool_ids`, and `model`. Hand-tuned
+  prompts in the database are preserved.
+- `npm run sync-prompts` pushes markdown changes explicitly.
+  Optional `--workspace <slug>` to scope. Optional `--dry-run`
+  to preview the diff. Output:
+  `[update] PMHC Assistant: 312 → 480 words (+168)`.
+
+To edit a prompt:
+
+```bash
+$EDITOR prompts/pmhc.md
+npm run sync-prompts -- --workspace pmhc --dry-run   # preview
+npm run sync-prompts -- --workspace pmhc             # write
+```
+
+## Default model
+
+All seeded agents now default to `claude-sonnet-4-6` (~5x cheaper
+than Opus 4.7 for the work Roost agents typically do). The
+`agents.model` column default has flipped via migration
+`0010_default_sonnet.sql`, and any existing rows on
+`claude-opus-4-7` have been rewritten.
+
+To switch a single agent back to Opus for harder work (long-form
+writing, complex analysis):
+
+```sql
+update public.agents
+set model = 'claude-opus-4-7'
+where name = 'PMHC Assistant';
+```
+
+The pricing table in `shared/pricing.ts` covers both models, so
+costs roll up correctly per agent.
 
 ## Local development guardrails
 

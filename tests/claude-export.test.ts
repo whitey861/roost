@@ -239,6 +239,60 @@ describe('classifyConversation', () => {
   });
 });
 
+describe('projects/ ingestion', () => {
+  it('parser tags conversations with the projectName when provided', () => {
+    const raw = JSON.parse(readFileSync(join(__dirname, 'fixtures/sample-export/projects/RoostBuild/conversations.json'), 'utf8'));
+    const convs = parseConversations(raw, 'RoostBuild');
+    expect(convs).toHaveLength(1);
+    expect(convs[0]?.projectName).toBe('RoostBuild');
+  });
+
+  it('classifier prompt includes the project name when set', () => {
+    const conv: ParsedConversation = {
+      uuid: 'x', name: 'Schema chat', created_at: null, updated_at: null,
+      messages: [
+        { uuid: 'a', sender: 'human', text: 'Roost schema?', created_at: null },
+        { uuid: 'b', sender: 'assistant', text: 'Sure', created_at: null },
+      ],
+      projectName: 'RoostBuild',
+    };
+    const { userPrompt } = buildClassifierPrompts(conv);
+    expect(userPrompt).toContain('Claude.ai Project: RoostBuild');
+  });
+
+  it('rendered markdown header references the project name', () => {
+    const conv: ParsedConversation = {
+      uuid: 'aabbccdd-1111-2222-3333-444455556666', name: 'Trip plan',
+      created_at: '2026-03-01T08:00:00Z', updated_at: '2026-03-01T08:30:00Z',
+      messages: [{ uuid: 'a', sender: 'human', text: 'Hi.', created_at: null }],
+      projectName: 'Trip2026',
+    };
+    const md = renderConversationMarkdown(conv);
+    expect(md).toContain('project: Trip2026');
+  });
+
+  it('ingestOneConversation stamps metadata.project when projectName is set', async () => {
+    const fx = clientWithWorkspaces();
+    const conv: ParsedConversation = {
+      uuid: 'xx-1', name: 'Roost build chat',
+      created_at: null, updated_at: null,
+      messages: [
+        { uuid: 'a', sender: 'human', text: 'Roost', created_at: null },
+        { uuid: 'b', sender: 'assistant', text: 'Adevus', created_at: null },
+      ],
+      projectName: 'RoostBuild',
+    };
+    const classify: Classifier = async () => ({
+      text: '{"workspace":"dev","confidence":0.95,"reasoning":"Roost build"}',
+      usage: { inputTokens: 100, outputTokens: 30 },
+    });
+    const r = await ingestOneConversation(fx.client, fakeEmbed, classify, fx.workspaceIds, conv, {});
+    expect(r.outcome).toBe('ingested');
+    const doc = fx.db.tableRows('knowledge_documents')[0]!;
+    expect((doc.metadata as Record<string, unknown>).project).toBe('RoostBuild');
+  });
+});
+
 describe('makeAnthropicClassifier', () => {
   const liveConv: ParsedConversation = {
     uuid: 'live',

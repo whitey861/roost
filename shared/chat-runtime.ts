@@ -12,7 +12,7 @@ import { approvalRequired, loadAgentTools, toAnthropicToolDefs, type ToolRow } f
 import { runMockTool } from './tools.js';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.js';
 import { costUsd } from './pricing.js';
-import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit } from './retrieval.js';
+import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit, type RetrieveOptions } from './retrieval.js';
 
 // SHARED_RUNTIME_START
 
@@ -27,6 +27,7 @@ export interface RunChatParams {
   channelIdentifier?: string;
   userMessage: string;
   maxToolIterations?: number;
+  retrievalOptions?: RetrieveOptions;
 }
 
 export interface ChatRunResult {
@@ -233,7 +234,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   // no chunks meet the similarity threshold.
   let knowledgeHits: KnowledgeHit[] = [];
   try {
-    knowledgeHits = await retrieveTopK(client, workspace.id, params.userMessage, 4, 0.4);
+    knowledgeHits = await retrieveTopK(client, workspace.id, params.userMessage, 4, 0.4, params.retrievalOptions);
   } catch {
     knowledgeHits = [];
   }
@@ -360,7 +361,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
         if (toolRow.handler_type === 'internal' && tu.name === 'search_knowledge') {
           const q = String(tu.input.query ?? '');
           const max = Math.min(10, Math.max(1, Number(tu.input.max_results ?? 5)));
-          const hits = await retrieveTopK(client, workspace.id, q, max, 0.3);
+          const hits = await retrieveTopK(client, workspace.id, q, max, 0.3, params.retrievalOptions);
           out = { hits };
         } else {
           out = runMockTool(tu.name, tu.input);

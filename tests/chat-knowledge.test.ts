@@ -119,6 +119,40 @@ describe('chat runtime: knowledge auto-injection', () => {
   });
 });
 
+describe('chat runtime: retrievalOptions injection', () => {
+  it('uses an injected fetchImpl for embedding so tests never hit real Voyage', async () => {
+    const fx = seedFakeDb();
+    const calls: string[] = [];
+    const stubFetch: typeof fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      const u = String(url);
+      calls.push(u);
+      const body = JSON.parse(String(init?.body ?? '{}')) as { input: string[] };
+      const data = body.input.map((_, i) => ({ embedding: FAKE_VEC, index: i }));
+      return new Response(JSON.stringify({ data, usage: { total_tokens: 1 } }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const rpc: RpcHandler = async () => ({ data: [], error: null });
+    const client = clientWithRpc(fx.db, rpc);
+    const anthropic = new FakeAnthropic([
+      { text: 'No knowledge.', stopReason: 'end_turn', inputTokens: 1, outputTokens: 1 },
+    ]);
+
+    await collect(runChat({
+      client,
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'Hi',
+      retrievalOptions: { embedOptions: { apiKey: 'test', fetchImpl: stubFetch } },
+    }));
+
+    // The injected fetch was used, not the global one.
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]).toContain('voyageai.com');
+  });
+});
+
 describe('chat runtime: search_knowledge tool dispatch', () => {
   it('routes search_knowledge calls to retrieveTopK and feeds hits back to the model', async () => {
     const fx = seedFakeDb();

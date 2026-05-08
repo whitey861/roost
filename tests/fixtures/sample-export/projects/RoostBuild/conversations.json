@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "aaaaaaa1-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "name": "Roost Phase 3 schema design",
+    "created_at": "2026-04-21T09:00:00Z",
+    "updated_at": "2026-04-21T11:00:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "Design pgvector schema for Roost knowledge layer" },
+      { "uuid": "m2", "sender": "assistant", "text": "Use vector(1024) and HNSW with cosine distance ..." }
+    ]
+  }
+]

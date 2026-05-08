@@ -22,6 +22,9 @@ export interface ParsedConversation {
   created_at: string | null;
   updated_at: string | null;
   messages: ParsedMessage[];
+  // Set when this conversation came from a Claude.ai Project subfolder.
+  // The folder name is treated as the project name.
+  projectName?: string | null;
 }
 
 interface RawContentBlock {
@@ -61,7 +64,7 @@ export function extractMessageText(msg: RawMessage): string {
   return '';
 }
 
-export function parseConversations(raw: unknown): ParsedConversation[] {
+export function parseConversations(raw: unknown, projectName: string | null = null): ParsedConversation[] {
   if (!Array.isArray(raw)) return [];
   const out: ParsedConversation[] = [];
   for (const c of raw as RawConversation[]) {
@@ -86,6 +89,7 @@ export function parseConversations(raw: unknown): ParsedConversation[] {
       created_at: c.created_at ?? null,
       updated_at: c.updated_at ?? c.created_at ?? null,
       messages,
+      projectName,
     });
   }
   return out;
@@ -102,7 +106,10 @@ export function renderConversationMarkdown(conv: ParsedConversation): string {
   const lines: string[] = [];
   lines.push(`# ${conv.name}`);
   lines.push('');
-  lines.push(`_Source: Claude.ai export, conversation ${shortUuid}, last updated ${updated}_`);
+  const sourceParts = [`Claude.ai export, conversation ${shortUuid}`];
+  if (conv.projectName) sourceParts.push(`project: ${conv.projectName}`);
+  sourceParts.push(`last updated ${updated}`);
+  lines.push(`_Source: ${sourceParts.join(', ')}_`);
   lines.push('');
   conv.messages.forEach((m, i) => {
     const who = m.sender === 'assistant' ? 'Assistant' : 'Paul';
@@ -161,12 +168,14 @@ function truncate(s: string, n: number): string {
 export function buildClassifierPrompts(conv: ParsedConversation): { systemPrompt: string; userPrompt: string } {
   const firstUser = conv.messages.find((m) => m.sender === 'human');
   const firstAssistant = conv.messages.find((m) => m.sender === 'assistant');
-  const userPrompt = [
-    `Title: ${conv.name}`,
-    `First user message: ${truncate(firstUser?.text ?? '(none)', 500)}`,
-    `First assistant message: ${truncate(firstAssistant?.text ?? '(none)', 500)}`,
-  ].join('\n');
-  return { systemPrompt: CLASSIFIER_SYSTEM_PROMPT, userPrompt };
+  const lines: string[] = [];
+  if (conv.projectName) {
+    lines.push(`Claude.ai Project: ${conv.projectName} (this is strong context for classification)`);
+  }
+  lines.push(`Title: ${conv.name}`);
+  lines.push(`First user message: ${truncate(firstUser?.text ?? '(none)', 500)}`);
+  lines.push(`First assistant message: ${truncate(firstAssistant?.text ?? '(none)', 500)}`);
+  return { systemPrompt: CLASSIFIER_SYSTEM_PROMPT, userPrompt: lines.join('\n') };
 }
 
 // Defensive JSON extractor: tolerates markdown code fences, surrounding
@@ -565,11 +574,16 @@ export async function ingestOneConversation(
     force: true,
   });
 
-  // Stamp the metadata column with secondary workspaces if any.
-  if (secondaryWorkspaces.length > 0) {
+  // Stamp the metadata column with secondary workspaces and the
+  // project name (when this conversation came from a Claude.ai
+  // Project subfolder) so retrieved chunks can show their origin.
+  const metadataPatch: Record<string, unknown> = {};
+  if (secondaryWorkspaces.length > 0) metadataPatch.secondary_workspaces = secondaryWorkspaces;
+  if (conv.projectName) metadataPatch.project = conv.projectName;
+  if (Object.keys(metadataPatch).length > 0) {
     await client
       .from('knowledge_documents')
-      .update({ metadata: { secondary_workspaces: secondaryWorkspaces } })
+      .update({ metadata: metadataPatch })
       .eq('id', result.documentId);
   }
 

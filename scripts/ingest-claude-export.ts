@@ -9,7 +9,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   estimateCost,
@@ -19,6 +19,7 @@ import {
   parseConversations,
   summarise,
   type ConversationRunReport,
+  type ParsedConversation,
   type PipelineSummary,
 } from '../shared/claude-export.js';
 import { voyageEmbedder } from '../shared/ingest-core.js';
@@ -31,6 +32,7 @@ interface CliArgs {
   force?: boolean;
   limit?: number;
   excludePersonal?: boolean;
+  projectsOnly?: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -42,15 +44,18 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--force') out.force = true;
     else if (a === '--limit') out.limit = Number(argv[++i]);
     else if (a === '--exclude-personal') out.excludePersonal = true;
+    else if (a === '--projects-only') out.projectsOnly = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Roost: ingest a Claude.ai conversations export.
 
 Options:
-  --path <dir>           extracted export folder (containing conversations.json)
+  --path <dir>           extracted export folder (containing conversations.json
+                         and/or a projects/ subfolder)
   --dry-run              classify only, no Supabase writes, no embeds
   --force                re-classify and re-ingest existing conversations
   --limit <n>            only process the first n conversations (testing)
   --exclude-personal     remap personal-classified conversations to none
+  --projects-only        skip top-level conversations.json, only process projects/
 `);
       process.exit(0);
     }
@@ -64,14 +69,52 @@ function requireEnv(key: string): string {
   return v;
 }
 
-function loadConversationsFile(exportPath: string): unknown {
+interface ConversationBatch {
+  source: string;            // file path, for logging
+  projectName: string | null; // null = top-level export
+  conversations: ParsedConversation[];
+}
+
+// Walk an extracted export folder and produce one batch per
+// conversations.json found. Top-level batch has projectName=null;
+// each `projects/<name>/conversations.json` becomes its own batch
+// with projectName set to the folder name.
+function loadAllBatches(exportPath: string, opts: { projectsOnly: boolean }): ConversationBatch[] {
   if (!existsSync(exportPath)) throw new Error(`Path does not exist: ${exportPath}`);
   const stat = statSync(exportPath);
-  const conversationsPath = stat.isDirectory() ? join(exportPath, 'conversations.json') : exportPath;
-  if (!existsSync(conversationsPath)) {
-    throw new Error(`conversations.json not found at ${conversationsPath}`);
+  const root = stat.isDirectory() ? exportPath : join(exportPath, '..');
+
+  const batches: ConversationBatch[] = [];
+
+  if (!opts.projectsOnly) {
+    const topPath = stat.isDirectory() ? join(root, 'conversations.json') : exportPath;
+    if (existsSync(topPath)) {
+      const raw = JSON.parse(readFileSync(topPath, 'utf8'));
+      batches.push({ source: topPath, projectName: null, conversations: parseConversations(raw, null) });
+    }
   }
-  return JSON.parse(readFileSync(conversationsPath, 'utf8'));
+
+  const projectsDir = join(root, 'projects');
+  if (existsSync(projectsDir) && statSync(projectsDir).isDirectory()) {
+    for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.')) continue;
+      const projectFolder = join(projectsDir, entry.name);
+      const projectConvPath = join(projectFolder, 'conversations.json');
+      if (!existsSync(projectConvPath)) {
+        console.warn(`[warn] ${projectFolder}: no conversations.json found, skipping.`);
+        continue;
+      }
+      const raw = JSON.parse(readFileSync(projectConvPath, 'utf8'));
+      batches.push({
+        source: projectConvPath,
+        projectName: entry.name,
+        conversations: parseConversations(raw, entry.name),
+      });
+    }
+  }
+
+  return batches;
 }
 
 function pad(s: string | number, width: number, right = false): string {
@@ -148,14 +191,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const raw = loadConversationsFile(args.path);
-  let conversations = parseConversations(raw);
+  const batches = loadAllBatches(args.path, { projectsOnly: Boolean(args.projectsOnly) });
+  let conversations: ParsedConversation[] = [];
+  for (const b of batches) {
+    console.log(`Loaded ${b.conversations.length} conversations from ${b.source}${b.projectName ? ` [project: ${b.projectName}]` : ''}.`);
+    conversations.push(...b.conversations);
+  }
   if (args.limit && args.limit > 0) conversations = conversations.slice(0, args.limit);
   if (conversations.length === 0) {
     console.log('No conversations parsed. Nothing to do.');
     return;
   }
-  console.log(`Parsed ${conversations.length} conversations from ${args.path}.`);
+  console.log(`Total ${conversations.length} conversations to process.`);
 
   // Live wiring.
   const supabaseUrl = args.dryRun ? '' : requireEnv('SUPABASE_URL');

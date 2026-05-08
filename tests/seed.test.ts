@@ -2,8 +2,12 @@
 // Supabase, which is out of scope for unit tests.
 
 import { describe, it, expect } from 'vitest';
-import { WORKSPACES, AGENTS } from '../shared/agents.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { WORKSPACES, AGENTS, DEFAULT_AGENT_MODEL } from '../shared/agents.js';
 import { TOOLS } from '../shared/tools.js';
+
+const REPO_ROOT = join(__dirname, '..');
 
 describe('seed: workspaces and agents', () => {
   it('seeds the five expected workspaces', () => {
@@ -18,17 +22,31 @@ describe('seed: workspaces and agents', () => {
     }
   });
 
-  it('agent system prompts include the workspace context', () => {
+  it('every agent has a markdown prompt file that exists on disk', () => {
     for (const a of AGENTS) {
-      const ws = WORKSPACES.find((w) => w.slug === a.workspaceSlug)!;
-      expect(a.systemPrompt).toContain(ws.description);
+      const path = join(REPO_ROOT, a.promptFile);
+      expect(existsSync(path), `missing ${a.promptFile}`).toBe(true);
     }
   });
 
-  it('agent system prompts contain no em dashes', () => {
+  it('agent prompt files include the workspace description', () => {
     for (const a of AGENTS) {
-      expect(a.systemPrompt.includes('—')).toBe(false);
+      const ws = WORKSPACES.find((w) => w.slug === a.workspaceSlug)!;
+      const content = readFileSync(join(REPO_ROOT, a.promptFile), 'utf8');
+      expect(content).toContain(ws.description);
     }
+  });
+
+  it('agent prompt files contain no em dashes', () => {
+    for (const a of AGENTS) {
+      const content = readFileSync(join(REPO_ROOT, a.promptFile), 'utf8');
+      expect(content.includes('—'), `${a.promptFile} contains em dash`).toBe(false);
+    }
+  });
+
+  it('all default agents use Sonnet 4.6', () => {
+    expect(DEFAULT_AGENT_MODEL).toBe('claude-sonnet-4-6');
+    for (const a of AGENTS) expect(a.model).toBe('claude-sonnet-4-6');
   });
 });
 

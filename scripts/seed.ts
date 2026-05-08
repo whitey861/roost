@@ -7,8 +7,11 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { WORKSPACES, AGENTS } from '../shared/agents.js';
 import { TOOLS } from '../shared/tools.js';
+import { upsertAgent } from '../shared/seed-core.js';
 
 loadEnv();
 
@@ -120,6 +123,11 @@ async function ensureAgents(
   workspaceIds: Record<string, string>,
   toolIds: Record<string, string>,
 ): Promise<void> {
+  const readPrompt = (relPath: string): string => {
+    const abs = resolve(process.cwd(), relPath);
+    return readFileSync(abs, 'utf8');
+  };
+
   for (const a of AGENTS) {
     const wsId = workspaceIds[a.workspaceSlug];
     if (!wsId) throw new Error(`Missing workspace: ${a.workspaceSlug}`);
@@ -127,36 +135,16 @@ async function ensureAgents(
       .map((n) => toolIds[n])
       .filter((id): id is string => Boolean(id));
 
-    // Look for an existing agent by (workspace_id, name).
-    const { data: existing, error: lookupErr } = await client
-      .from('agents')
-      .select('id')
-      .eq('workspace_id', wsId)
-      .eq('name', a.name)
-      .maybeSingle();
-    if (lookupErr) throw new Error(`agent lookup failed: ${lookupErr.message}`);
-
-    if (existing) {
-      const { error } = await client
-        .from('agents')
-        .update({
-          role_description: a.roleDescription,
-          system_prompt: a.systemPrompt,
-          allowed_tool_ids: allowedToolIds,
-        })
-        .eq('id', existing.id);
-      if (error) throw new Error(`agent update failed: ${error.message}`);
-      console.log(`Agent ${a.name}: updated`);
+    const result = await upsertAgent(client, {
+      seed: a,
+      workspaceId: wsId,
+      allowedToolIds,
+      readPrompt,
+    });
+    if (result.status === 'created') {
+      console.log(`Agent ${a.name}: created (prompt from ${a.promptFile}, model ${a.model})`);
     } else {
-      const { error } = await client.from('agents').insert({
-        workspace_id: wsId,
-        name: a.name,
-        role_description: a.roleDescription,
-        system_prompt: a.systemPrompt,
-        allowed_tool_ids: allowedToolIds,
-      });
-      if (error) throw new Error(`agent insert failed: ${error.message}`);
-      console.log(`Agent ${a.name}: created`);
+      console.log(`Agent ${a.name}: updated (system_prompt preserved, model → ${a.model})`);
     }
   }
 }
