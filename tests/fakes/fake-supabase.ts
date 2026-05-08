@@ -73,6 +73,10 @@ class QueryBuilder {
     this.filters.push((r) => r[field] === value);
     return this;
   }
+  neq(field: string, value: unknown): this {
+    this.filters.push((r) => r[field] !== value);
+    return this;
+  }
   in(field: string, values: unknown[]): this {
     this.filters.push((r) => values.includes(r[field]));
     return this;

@@ -1,0 +1,69 @@
+[
+  {
+    "uuid": "11111111-1111-1111-1111-111111111111",
+    "name": "Beacon platform Q3 plan",
+    "created_at": "2026-04-01T10:00:00Z",
+    "updated_at": "2026-04-02T10:00:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "Help me draft the Beacon Q3 plan for council. We need ServiceDesk Plus replacement scope.", "created_at": "2026-04-01T10:00:00Z" },
+      { "uuid": "m2", "sender": "assistant", "text": "Beacon Phase 2 should focus on service catalogue migration first.", "created_at": "2026-04-01T10:01:00Z" }
+    ]
+  },
+  {
+    "uuid": "22222222-2222-2222-2222-222222222222",
+    "name": "Koala hospital fundraising letter",
+    "created_at": "2026-03-15T09:00:00Z",
+    "updated_at": "2026-03-15T09:30:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "content": [{ "type": "text", "text": "Draft a donor appeal for the Guulabaa koala hospital build. Board has approved phase one funding." }] },
+      { "uuid": "m2", "sender": "assistant", "content": [{ "type": "text", "text": "Dear supporter, KCA's koala hospital project at Guulabaa..." }] }
+    ]
+  },
+  {
+    "uuid": "33333333-3333-3333-3333-333333333333",
+    "name": "Foster care meal plan",
+    "created_at": "2026-02-10T18:00:00Z",
+    "updated_at": "2026-02-10T18:10:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "We have two foster placements this weekend. Plan a kid-friendly meal rotation." },
+      { "uuid": "m2", "sender": "assistant", "text": "Here is a weekend rotation tailored for children..." }
+    ]
+  },
+  {
+    "uuid": "44444444-4444-4444-4444-444444444444",
+    "name": "Roost backend Phase 3 schema",
+    "created_at": "2026-04-20T12:00:00Z",
+    "updated_at": "2026-04-20T13:00:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "Adevus question: how should I store voyage-3 embeddings in Supabase pgvector for the Roost knowledge layer?" },
+      { "uuid": "m2", "sender": "assistant", "text": "Use a vector(1024) column with HNSW cosine index..." }
+    ]
+  },
+  {
+    "uuid": "55555555-5555-5555-5555-555555555555",
+    "name": "Random trivia question",
+    "created_at": "2026-01-05T08:00:00Z",
+    "updated_at": "2026-01-05T08:01:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "What is the boiling point of nitrogen?" },
+      { "uuid": "m2", "sender": "assistant", "text": "Approximately 77 K at one atmosphere." }
+    ]
+  },
+  {
+    "uuid": "66666666-6666-6666-6666-666666666666",
+    "name": "AI strategy and Adevus product roadmap",
+    "created_at": "2026-04-25T14:00:00Z",
+    "updated_at": "2026-04-25T14:30:00Z",
+    "chat_messages": [
+      { "uuid": "m1", "sender": "human", "text": "Tie council AI strategy goals together with our Adevus Vox launch. Where do they overlap?" },
+      { "uuid": "m2", "sender": "assistant", "text": "Both depend on automated voice assistant capability for citizens and developers..." }
+    ]
+  },
+  {
+    "uuid": "77777777-7777-7777-7777-777777777777",
+    "name": "Empty conversation",
+    "created_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T00:00:00Z",
+    "chat_messages": []
+  }
+]

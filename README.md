@@ -170,6 +170,55 @@ Agents can also call `search_knowledge` directly. The internal dispatch
 runs the same retrieval with caller-controlled `query` and `max_results`,
 returns the hits as JSON, and feeds the result back into the model.
 
+### Ingesting a Claude.ai conversations export
+
+Claude.ai → Settings → Privacy → Export data emails a ZIP. Extract it,
+then:
+
+```bash
+# Classify only, no writes (sanity check the classifications first)
+npm run ingest-claude-export -- --path /path/to/extracted/export --dry-run
+
+# Full ingest
+npm run ingest-claude-export -- --path /path/to/extracted/export
+
+# Re-classify and re-ingest (use after tweaking the classifier prompt)
+npm run ingest-claude-export -- --path ... --force
+
+# Process only the first N conversations (testing)
+npm run ingest-claude-export -- --path ... --limit 10
+
+# Skip personal-classified conversations
+npm run ingest-claude-export -- --path ... --exclude-personal
+```
+
+What happens per conversation:
+
+1. Build `source_ref = claude_export:<uuid>` and check whether the
+   document already exists. If yes and not `--force`, skip without
+   spending classifier tokens.
+2. Otherwise, ask Claude Haiku (`CLAUDE_CLASSIFIER_MODEL`, default
+   `claude-haiku-4-5-20251001`) to classify the conversation against
+   the five workspaces using just the title + first user message +
+   first assistant message (each truncated). Confidence below 0.5
+   collapses to `none`.
+3. `none` skips. `multiple` ingests into the primary workspace and
+   tags the others in the document's `metadata.secondary_workspaces`.
+   Single workspace results ingest into that one.
+4. The conversation is rendered as markdown (one `##` section per
+   message), prefixed with the chunker-friendly title block, then
+   passed through the existing chunk-and-embed pipeline.
+
+At the end the script prints a workspace-by-workspace summary plus
+embedding cost (Voyage) and classifier cost (Haiku).
+
+Re-running the script without `--force` is idempotent: already-ingested
+conversations are detected by their UUID and skipped.
+
+Cost guide: classifier is ~$0.0006 per conversation (Haiku 4.5);
+embedding is dominated by long conversations and chunked at ~600
+tokens. For ~300 conversations expect ~$0.20 total.
+
 ### Reindex (after upgrading the embedding model or chunker)
 
 ```bash
@@ -261,6 +310,9 @@ The suite covers:
 - Voyage embeddings client (batching, retries, auth failure)
 - knowledge retrieval (top-K, workspace filter, threshold, graceful failure)
 - ingestion end-to-end (create, skip, replace, force, frontmatter)
+- Claude.ai export parser, classifier, markdown renderer, and ingest
+  pipeline (single-workspace, multiple, none, force, dry-run,
+  exclude-personal, idempotent re-runs)
 - Telegram slash and callback parsers, pairing code generator
 - runtime parity script and its helper edge cases
 
