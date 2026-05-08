@@ -77,6 +77,8 @@ export function seedFakeDb(opts: { approvalMode?: 'all_outbound' | 'autonomous' 
   db.seedTable('outbound_actions', []);
   db.seedTable('agent_tool_overrides', []);
   db.seedTable('telegram_links', []);
+  db.seedTable('knowledge_documents', []);
+  db.seedTable('knowledge_chunks', []);
 
   return { db, workspaceId, agentId, userId, toolIds };
 }

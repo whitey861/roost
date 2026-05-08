@@ -65,6 +65,24 @@ export const TOOLS: ToolDefinition[] = [
     isOutbound: true,
     workspaceScope: ['*'],
   },
+  {
+    name: 'search_knowledge',
+    description:
+      "Search this workspace's knowledge base for information relevant to a query. Use this when you need additional context beyond what's already in the conversation, or to find specific facts about projects, people, or decisions in this workspace.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to search for. Use natural language.' },
+        max_results: { type: 'integer', default: 5, minimum: 1, maximum: 10 },
+      },
+      required: ['query'],
+    },
+    handlerType: 'internal',
+    handlerConfig: {},
+    requiresApprovalDefault: false,
+    isOutbound: false,
+    workspaceScope: ['*'],
+  },
 ];
 
 export function toAnthropicToolDef(t: { name: string; description: string | null; input_schema: Record<string, unknown> }): AnthropicToolDef {

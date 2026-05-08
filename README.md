@@ -102,6 +102,168 @@ saying hi". `mock_send_email` is outbound, so the runtime queues an
 `outbound_actions` row with `status='pending'` and the assistant tells
 you it has been queued.
 
+## Phase 3: Knowledge layer (RAG)
+
+Each workspace can hold markdown notes, transcripts, decisions, and reference
+material. The chat runtime automatically retrieves the most relevant chunks
+per query and prepends them to the agent's system prompt. Agents can also
+explicitly call the `search_knowledge` tool when they want more.
+
+### One-time setup
+
+```bash
+# 1. Add VOYAGE_API_KEY to .env (https://www.voyageai.com/).
+# 2. Apply the new migration so pgvector + knowledge_documents +
+#    knowledge_chunks + match_knowledge_chunks RPC are present.
+npm run migrate
+# 3. Re-run seed to add the search_knowledge tool to every default agent.
+npm run seed
+```
+
+### Adding knowledge
+
+Drop markdown files into `knowledge/<workspace_slug>/`, then ingest:
+
+```bash
+# One file
+npm run ingest -- --workspace pmhc --file knowledge/pmhc/ai-strategy.md
+
+# Whole workspace
+npm run ingest -- --workspace pmhc
+
+# Everything across all workspaces
+npm run ingest -- --all
+
+# Force re-chunk and re-embed even if the file is older than chunked_at
+npm run ingest -- --workspace pmhc --force
+
+# Chunk only, no Voyage calls, no Supabase writes (useful for tuning)
+npm run ingest -- --workspace pmhc --dry-run
+```
+
+Optional frontmatter at the top of any markdown file:
+
+```yaml
+---
+title: AI Strategy 2026-2030
+tags: [strategy, board-decisions]
+source_url: https://intranet.example/strategy
+source_type: markdown
+---
+```
+
+`title` defaults to the filename. `source_type` defaults to `markdown`.
+
+### How retrieval works
+
+For every chat message the runtime does:
+
+1. Embed the user's message with Voyage (`voyage-3`, 1024-dim, query mode).
+2. Call the `match_knowledge_chunks` RPC for the workspace, top 4 chunks.
+3. Filter by similarity threshold 0.4 (drops noise).
+4. If hits remain, format them as a `<workspace_knowledge>` block and prepend
+   to the agent's system prompt for that turn only.
+5. If `VOYAGE_API_KEY` is missing or Voyage errors out, retrieval is a
+   graceful no-op: the chat continues without injected context.
+
+Agents can also call `search_knowledge` directly. The internal dispatch
+runs the same retrieval with caller-controlled `query` and `max_results`,
+returns the hits as JSON, and feeds the result back into the model.
+
+### Ingesting a Claude.ai conversations export
+
+Claude.ai → Settings → Privacy → Export data emails a ZIP. Extract it,
+then:
+
+```bash
+# Classify only, no writes (sanity check the classifications first)
+npm run ingest-claude-export -- --path /path/to/extracted/export --dry-run
+
+# Full ingest
+npm run ingest-claude-export -- --path /path/to/extracted/export
+
+# Re-classify and re-ingest (use after tweaking the classifier prompt)
+npm run ingest-claude-export -- --path ... --force
+
+# Process only the first N conversations (testing)
+npm run ingest-claude-export -- --path ... --limit 10
+
+# Skip personal-classified conversations
+npm run ingest-claude-export -- --path ... --exclude-personal
+```
+
+What happens per conversation:
+
+1. Build `source_ref = claude_export:<uuid>` and check whether the
+   document already exists. If yes and not `--force`, skip without
+   spending classifier tokens.
+2. Otherwise, ask Claude Haiku (`CLAUDE_CLASSIFIER_MODEL`, default
+   `claude-haiku-4-5-20251001`) to classify the conversation against
+   the five workspaces using just the title + first user message +
+   first assistant message (each truncated). Confidence below 0.5
+   collapses to `none`.
+3. `none` skips. `multiple` ingests into the primary workspace and
+   tags the others in the document's `metadata.secondary_workspaces`.
+   Single workspace results ingest into that one.
+4. The conversation is rendered as markdown (one `##` section per
+   message), prefixed with the chunker-friendly title block, then
+   passed through the existing chunk-and-embed pipeline.
+
+At the end the script prints a workspace-by-workspace summary plus
+embedding cost (Voyage) and classifier cost (Haiku).
+
+Re-running the script without `--force` is idempotent: already-ingested
+conversations are detected by their UUID and skipped.
+
+Tuning knobs (env vars):
+
+- `CLAUDE_CLASSIFIER_MODEL` (default `claude-haiku-4-5-20251001`):
+  pick a different classifier if you want more accuracy at higher cost.
+- `ROOST_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`): conversations
+  classified with confidence below this are remapped to `none`.
+  Lower it (e.g. `0.3`) if Haiku is conservative and legitimate
+  classifications are getting flipped.
+- `ROOST_DEBUG_CLASSIFIER=1`: dumps the raw classifier response,
+  the extracted JSON, the parsed classification, and any
+  threshold flips for every conversation. Use this whenever
+  classifications look wrong; the output explains exactly what
+  the model returned.
+
+The live classifier uses Anthropic's assistant-prefill technique
+(starts the assistant message with `{`) to force pure JSON output,
+so markdown fences and stray prose around the JSON shouldn't
+happen in practice; the parser also tolerates them as a backstop.
+
+Cost guide: classifier is ~$0.0006 per conversation (Haiku 4.5);
+embedding is dominated by long conversations and chunked at ~600
+tokens. For ~300 conversations expect ~$0.20 total.
+
+### Reindex (after upgrading the embedding model or chunker)
+
+```bash
+npm run reindex -- --workspace pmhc
+npm run reindex -- --dry-run
+```
+
+Reindex re-chunks each document from `content_md` (stored at ingest time)
+and re-embeds. No file system access required.
+
+### `knowledge/personal/`
+
+`knowledge/personal/*` is gitignored. Drop private notes there; they stay
+local. The other four workspace folders are tracked.
+
+### Cost notes
+
+- Embedding: ~$0.06 per million tokens. 50 documents averaging 2k tokens
+  each is ~100k tokens, ~0.6 cents to embed.
+- Per-chat retrieval: 4 chunks of ~600 tokens each = ~2400 added tokens
+  per turn. On Opus that's ~3.6 cents per turn extra; on Sonnet ~0.7
+  cents. Switch agents to Sonnet 4.6 for general chat to keep this in
+  check.
+- Storage: pgvector chunks are tiny in DB terms; even 10,000 chunks is
+  comfortably under 50MB.
+
 ## Phase 2: Telegram
 
 ```bash
@@ -161,7 +323,15 @@ The suite covers:
 - seed shape (workspace count, agents, tools)
 - chat runtime: no-tool happy path, tool call loop, approval gating,
   budget enforcement, day-rollover behaviour
+- chat runtime knowledge auto-injection and search_knowledge dispatch
 - history reconstruction (DB rows to Claude messages)
+- markdown chunker (sections, overlap, header-less docs)
+- Voyage embeddings client (batching, retries, auth failure)
+- knowledge retrieval (top-K, workspace filter, threshold, graceful failure)
+- ingestion end-to-end (create, skip, replace, force, frontmatter)
+- Claude.ai export parser, classifier, markdown renderer, and ingest
+  pipeline (single-workspace, multiple, none, force, dry-run,
+  exclude-personal, idempotent re-runs)
 - Telegram slash and callback parsers, pairing code generator
 - runtime parity script and its helper edge cases
 
@@ -180,15 +350,16 @@ This runs four steps in order: parity check, Node typecheck, Edge
 Function typecheck, then the Vitest suite. Each is also runnable
 individually.
 
-- `npm run check:parity` - confirms `shared/chat-runtime.ts` and
-  `supabase/functions/_shared/chat-runtime.ts` haven't drifted.
-  Both files contain a canonical block delimited by
-  `// SHARED_RUNTIME_START` and `// SHARED_RUNTIME_END` markers.
-  The script strips comments and whitespace, hashes each block, and
-  fails if the hashes differ. Imports and adapter glue live outside
-  the markers and may differ between Node and Deno; business logic
-  (the agent loop, tool dispatch, approval gating, budget math,
-  message persistence ordering) lives inside and must be identical.
+- `npm run check:parity` - confirms paired Node/Deno files haven't
+  drifted. Each pair contains a canonical block delimited by
+  `// SHARED_RUNTIME_START` and `// SHARED_RUNTIME_END` markers
+  (both must appear on their own line). The script strips comments
+  and whitespace, hashes each block, and fails if any pair's hashes
+  differ. Imports and adapter glue live outside the markers and may
+  differ between Node and Deno; business logic lives inside and must
+  be identical. Currently checked pairs:
+  - `shared/chat-runtime.ts` ↔ `supabase/functions/_shared/chat-runtime.ts`
+  - `shared/retrieval.ts` ↔ `supabase/functions/_shared/retrieval.ts`
 - `npm run typecheck` - runs TypeScript against everything outside
   `supabase/functions/` (shared modules, scripts, tests).
 - `npm run typecheck:edge` - runs `deno check` on every Edge Function

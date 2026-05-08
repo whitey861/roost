@@ -64,5 +64,5 @@ export const AGENTS: AgentSeed[] = WORKSPACES.map((ws) => ({
   name: `${ws.name} Assistant`,
   roleDescription: `Default assistant for the ${ws.name} workspace.`,
   systemPrompt: prompt(ws),
-  toolNames: ['mock_echo', 'mock_search'],
+  toolNames: ['mock_echo', 'mock_search', 'search_knowledge'],
 }));

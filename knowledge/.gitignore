@@ -1,0 +1,4 @@
+# Personal workspace knowledge is private to Paul. Keep the folder
+# tracked (via .gitkeep) but exclude actual content.
+personal/*
+!personal/.gitkeep
