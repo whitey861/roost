@@ -83,7 +83,34 @@ export const TOOLS: ToolDefinition[] = [
     isOutbound: false,
     workspaceScope: ['*'],
   },
+  {
+    name: 'web_search',
+    description:
+      'Search the web for current information, news, facts, or anything not in your knowledge base. Use when the user asks about current events, recent developments, or specific facts you need to verify. Executed server-side by Anthropic; results are returned inline with citations.',
+    // input_schema is informational for anthropic_server tools — Anthropic
+    // determines actual usage server-side.
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query.' },
+      },
+      required: ['query'],
+    },
+    handlerType: 'anthropic_server',
+    handlerConfig: {
+      server_tool_type: 'web_search_20250305',
+      max_uses: 5,
+    },
+    requiresApprovalDefault: false,
+    isOutbound: false,
+    workspaceScope: ['*'],
+  },
 ];
+
+// Names of tools whose handler_type is 'anthropic_server'. The runtime uses
+// this to thread server-tool blocks through history reconstruction without
+// needing to re-query the tools table.
+export const SERVER_TOOL_NAMES: ReadonlySet<string> = new Set(['web_search']);
 
 export function toAnthropicToolDef(t: { name: string; description: string | null; input_schema: Record<string, unknown> }): AnthropicToolDef {
   return {

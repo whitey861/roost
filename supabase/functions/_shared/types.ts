@@ -9,11 +9,9 @@ export type ChannelType = 'web' | 'telegram';
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'system_event';
 export type OutboundActionStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'failed';
 
-export interface AnthropicToolDef {
-  name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-}
+export type AnthropicToolDef =
+  | { name: string; description: string; input_schema: Record<string, unknown> }
+  | { type: string; name: string; max_uses?: number };
 
 export type ChatStreamEvent =
   | { type: 'session'; session_id: string }

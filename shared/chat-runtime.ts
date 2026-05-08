@@ -9,7 +9,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ChatStreamEvent, ChannelType, WorkspaceApprovalMode } from './types.js';
 import { addSpend, getBudgetState, isOverBudget, rolloverIfNeeded } from './budget.js';
 import { approvalRequired, loadAgentTools, toAnthropicToolDefs, type ToolRow } from './tools-runtime.js';
-import { runMockTool } from './tools.js';
+import { runMockTool, SERVER_TOOL_NAMES } from './tools.js';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.js';
 import { costUsd } from './pricing.js';
 import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit, type QueryEmbedder } from './retrieval.js';
@@ -104,6 +104,9 @@ export async function loadHistory(client: SupabaseClient, sessionId: string): Pr
 }
 
 // Pure: turn ordered DB rows into Claude-shaped message history.
+// Server-side tool calls (handler_type='anthropic_server') and their results
+// belong inside the assistant message's content (Anthropic generated both),
+// so they go into pendingAssistant rather than pendingToolResults.
 export function reconstructHistory(rows: Array<{
   role: string;
   content: string | null;
@@ -117,6 +120,7 @@ export function reconstructHistory(rows: Array<{
   let pendingToolResults: AnthropicMessageContent[] | null = null;
 
   for (const m of rows) {
+    const isServerTool = m.tool_name !== null && SERVER_TOOL_NAMES.has(m.tool_name);
     if (m.role === 'user') {
       if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
       if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
@@ -127,20 +131,38 @@ export function reconstructHistory(rows: Array<{
       pendingAssistant.push({ type: 'text', text: m.content ?? '' });
     } else if (m.role === 'tool_call') {
       pendingAssistant = pendingAssistant ?? [];
-      pendingAssistant.push({
-        type: 'tool_use',
-        id: m.tool_call_id ?? '',
-        name: m.tool_name ?? '',
-        input: (m.tool_input ?? {}) as Record<string, unknown>,
-      });
+      if (isServerTool) {
+        pendingAssistant.push({
+          type: 'server_tool_use',
+          id: m.tool_call_id ?? '',
+          name: m.tool_name ?? '',
+          input: (m.tool_input ?? {}) as Record<string, unknown>,
+        });
+      } else {
+        pendingAssistant.push({
+          type: 'tool_use',
+          id: m.tool_call_id ?? '',
+          name: m.tool_name ?? '',
+          input: (m.tool_input ?? {}) as Record<string, unknown>,
+        });
+      }
     } else if (m.role === 'tool_result') {
-      if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
-      pendingToolResults = pendingToolResults ?? [];
-      pendingToolResults.push({
-        type: 'tool_result',
-        tool_use_id: m.tool_call_id ?? '',
-        content: JSON.stringify(m.tool_output ?? {}),
-      });
+      if (isServerTool) {
+        pendingAssistant = pendingAssistant ?? [];
+        pendingAssistant.push({
+          type: 'web_search_tool_result',
+          tool_use_id: m.tool_call_id ?? '',
+          content: (m.tool_output ?? {}) as unknown,
+        });
+      } else {
+        if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
+        pendingToolResults = pendingToolResults ?? [];
+        pendingToolResults.push({
+          type: 'tool_result',
+          tool_use_id: m.tool_call_id ?? '',
+          content: JSON.stringify(m.tool_output ?? {}),
+        });
+      }
     }
   }
   if (pendingAssistant) messages.push({ role: 'assistant', content: pendingAssistant });
@@ -168,7 +190,7 @@ async function persistAssistantTurn(
         tokens_out: usage.outputTokens,
         cost_usd: thisCallCost,
       });
-    } else if (block.type === 'tool_use') {
+    } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
       await client.from('messages').insert({
         session_id: sessionId,
         role: 'tool_call',
@@ -176,6 +198,14 @@ async function persistAssistantTurn(
         tool_name: block.name,
         tool_input: block.input,
         model,
+      });
+    } else if (block.type === 'web_search_tool_result') {
+      await client.from('messages').insert({
+        session_id: sessionId,
+        role: 'tool_result',
+        tool_call_id: block.tool_use_id,
+        tool_name: 'web_search',
+        tool_output: { content: block.content } as Record<string, unknown>,
       });
     }
   }
@@ -281,6 +311,10 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
           yield { type: 'token', text: ev.text };
         } else if (ev.type === 'tool_use_complete') {
           yield { type: 'tool_call', tool_call_id: ev.id, name: ev.name, input: ev.input };
+        } else if (ev.type === 'server_tool_use_complete') {
+          yield { type: 'tool_call', tool_call_id: ev.id, name: ev.name, input: ev.input };
+        } else if (ev.type === 'server_tool_result_complete') {
+          yield { type: 'tool_result', tool_call_id: ev.tool_use_id, output: { content: ev.content } as Record<string, unknown> };
         } else if (ev.type === 'message_complete') {
           stopReason = ev.stopReason;
           assistantContent = ev.content;

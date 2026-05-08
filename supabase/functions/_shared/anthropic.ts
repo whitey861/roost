@@ -11,7 +11,9 @@ import type { AnthropicToolDef } from './types.ts';
 export type AnthropicMessageContent =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'server_tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'web_search_tool_result'; tool_use_id: string; content: unknown };
 
 export interface AnthropicMessage {
   role: 'user' | 'assistant';
@@ -29,6 +31,8 @@ export interface StreamRequest {
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use_complete'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'server_tool_use_complete'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'server_tool_result_complete'; tool_use_id: string; toolName: string; content: unknown }
   | {
       type: 'message_complete';
       stopReason: string | null;
@@ -56,7 +60,15 @@ export function defaultAnthropicClient(): AnthropicClient {
       });
 
       // Track current content blocks by index.
-      const blocks: Record<number, { type: 'text' | 'tool_use'; text?: string; id?: string; name?: string; partialJson?: string }> = {};
+      const blocks: Record<number, {
+        type: 'text' | 'tool_use' | 'server_tool_use' | 'web_search_tool_result';
+        text?: string;
+        id?: string;
+        name?: string;
+        partialJson?: string;
+        toolUseId?: string;
+        content?: unknown;
+      }> = {};
       const finalContent: AnthropicMessageContent[] = [];
       let stopReason: string | null = null;
       const usage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
@@ -78,6 +90,11 @@ export function defaultAnthropicClient(): AnthropicClient {
             blocks[idx] = { type: 'text', text: '' };
           } else if (cb.type === 'tool_use') {
             blocks[idx] = { type: 'tool_use', id: cb.id, name: cb.name, partialJson: '' };
+          } else if (cb.type === 'server_tool_use') {
+            blocks[idx] = { type: 'server_tool_use', id: cb.id, name: cb.name, partialJson: '' };
+          } else if (cb.type === 'web_search_tool_result') {
+            // Server tool results arrive as a complete payload at start.
+            blocks[idx] = { type: 'web_search_tool_result', toolUseId: cb.tool_use_id, name: 'web_search', content: cb.content };
           }
           continue;
         }
@@ -88,7 +105,7 @@ export function defaultAnthropicClient(): AnthropicClient {
           if (e.delta.type === 'text_delta' && block.type === 'text') {
             block.text = (block.text ?? '') + e.delta.text;
             yield { type: 'text_delta', text: e.delta.text };
-          } else if (e.delta.type === 'input_json_delta' && block.type === 'tool_use') {
+          } else if (e.delta.type === 'input_json_delta' && (block.type === 'tool_use' || block.type === 'server_tool_use')) {
             block.partialJson = (block.partialJson ?? '') + (e.delta.partial_json ?? '');
           }
           continue;
@@ -113,6 +130,25 @@ export function defaultAnthropicClient(): AnthropicClient {
             }
             finalContent.push({ type: 'tool_use', id, name, input });
             yield { type: 'tool_use_complete', id, name, input };
+          } else if (block.type === 'server_tool_use') {
+            const id = block.id ?? '';
+            const name = block.name ?? '';
+            const raw = block.partialJson ?? '';
+            let input: Record<string, unknown> = {};
+            if (raw.length > 0) {
+              try {
+                input = JSON.parse(raw);
+              } catch {
+                input = { _raw: raw };
+              }
+            }
+            finalContent.push({ type: 'server_tool_use', id, name, input });
+            yield { type: 'server_tool_use_complete', id, name, input };
+          } else if (block.type === 'web_search_tool_result') {
+            const tool_use_id = block.toolUseId ?? '';
+            const content = block.content ?? null;
+            finalContent.push({ type: 'web_search_tool_result', tool_use_id, content });
+            yield { type: 'server_tool_result_complete', tool_use_id, toolName: block.name ?? 'web_search', content };
           }
           continue;
         }

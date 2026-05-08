@@ -61,7 +61,7 @@ export const AGENTS: AgentSeed[] = WORKSPACES.map((ws) => ({
   roleDescription: `Default assistant for the ${ws.name} workspace.`,
   promptFile: `prompts/${ws.slug}.md`,
   model: DEFAULT_MODEL,
-  toolNames: ['mock_echo', 'mock_search', 'search_knowledge'],
+  toolNames: ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'],
 }));
 
 // Resolve a prompt file path relative to the repository root, regardless of
