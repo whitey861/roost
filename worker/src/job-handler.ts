@@ -139,9 +139,7 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
 
 
     const claudeRes = await exec('claude', ['--print', '--dangerously-skip-permissions'], {
-    cwd: repoDir,
-
->>>> main
+      cwd: repoDir,
       env: {
         ...env,
       },
