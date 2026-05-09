@@ -1,10 +1,14 @@
 // Roost dev-agent worker entry point.
 //
 // Lifecycle:
-//   1. Boot. Recover any leases left stranded by previous crashes.
+//   1. Boot. Install crash-shield handlers, recover any leases left stranded
+//      by previous crashes.
 //   2. Loop forever:
 //        a. Try to lease one queued job.
-//        b. If we got one, fork a heartbeat keepalive and run it.
+//        b. If we got one, fork a heartbeat keepalive and run it. While it
+//           runs, periodically flush the in-memory log buffer to the
+//           dev_jobs.worker_log column so a crash leaves us with a usable
+//           post-mortem.
 //        c. Whether or not we got a job, run one notification dispatch pass.
 //        d. Sleep for POLL_INTERVAL_MS.
 
@@ -22,6 +26,36 @@ import { dispatchNotifications, insertNotification } from './notify.js';
 import type { DevJob, JobOutcome } from './types.js';
 
 const POLL_INTERVAL_MS = 10 * 1000;
+// How often to push the in-memory log buffer to dev_jobs.worker_log while
+// a job is running. Trades a small amount of write traffic for the ability
+// to see what the agent was doing right before any crash.
+const LOG_FLUSH_INTERVAL_MS = 2000;
+const LOG_BUF_MAX_BYTES = 64 * 1024;
+
+// Install a single set of last-resort handlers for the worker process. These
+// fire in cases like an unhandled rejection from a fire-and-forget promise
+// or an EPIPE on a child process pipe with no listener attached (we attach
+// them in exec.ts now, but the safety net belongs here too). The intent is
+// that the worker should NEVER exit because of a child-process event.
+let crashShieldsInstalled = false;
+function installCrashShields(): void {
+  if (crashShieldsInstalled) return;
+  crashShieldsInstalled = true;
+  process.on('uncaughtException', (err: Error) => {
+    console.error(
+      `[worker] uncaughtException: ${err.message}\n${err.stack ?? ''}`,
+    );
+  });
+  process.on('unhandledRejection', (reason: unknown) => {
+    const msg = reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason);
+    console.error(`[worker] unhandledRejection: ${msg}`);
+  });
+  // SIGPIPE shouldn't kill us either. Node masks SIGPIPE by default for
+  // most stdio configurations, but we make it explicit.
+  process.on('SIGPIPE', () => {
+    console.error('[worker] received SIGPIPE, ignoring');
+  });
+}
 
 async function processOneJob(
   client: SupabaseClient,
@@ -30,15 +64,63 @@ async function processOneJob(
 ): Promise<void> {
   const startTs = Date.now();
   const logBuf: string[] = [];
+
+  // Snapshot the latest buffer to dev_jobs.worker_log. We coalesce concurrent
+  // calls so a flush in flight doesn't race with the next one.
+  let flushing = false;
+  let flushAgain = false;
+  const flushLog = async (): Promise<void> => {
+    if (flushing) {
+      flushAgain = true;
+      return;
+    }
+    flushing = true;
+    try {
+      do {
+        flushAgain = false;
+        const snapshot = logBuf.join('\n').slice(-LOG_BUF_MAX_BYTES);
+        const { error } = await client
+          .from('dev_jobs')
+          .update({
+            worker_log: snapshot,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.id);
+        if (error) {
+          console.error(
+            `[worker] flushLog(${job.id}) failed: ${error.message}`,
+          );
+        }
+      } while (flushAgain);
+    } catch (err) {
+      console.error(
+        `[worker] flushLog(${job.id}) threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      flushing = false;
+    }
+  };
+
   const log = (line: string): void => {
     const stamped = `[${new Date().toISOString()}] ${line}`;
     console.log(stamped);
     logBuf.push(stamped);
-    // Cap in-memory log buffer at ~64KB so we don't OOM on very long runs.
-    if (logBuf.join('\n').length > 64 * 1024) logBuf.splice(0, Math.max(1, Math.floor(logBuf.length / 4)));
+    // Cap in-memory buffer so very long runs don't OOM.
+    if (logBuf.join('\n').length > LOG_BUF_MAX_BYTES) {
+      logBuf.splice(0, Math.max(1, Math.floor(logBuf.length / 4)));
+    }
   };
 
   log(`leased job ${job.id} (${job.target_repo})`);
+
+  // Periodic flush so a crash mid-job leaves us with the most recent N lines
+  // already persisted in dev_jobs.worker_log.
+  const flushTimer = setInterval(() => {
+    void flushLog();
+  }, LOG_FLUSH_INTERVAL_MS);
+  // Don't keep the event loop alive for this timer — we'll clear it
+  // ourselves in the finally block.
+  flushTimer.unref?.();
 
   let stopHeartbeat = false;
   const heartbeat = (async () => {
@@ -58,14 +140,23 @@ async function processOneJob(
   try {
     outcome = await runDevJob(job, { log });
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`[fatal] runDevJob threw: ${message}`);
     outcome = {
       status: 'failed',
-      error_message: err instanceof Error ? err.message : String(err),
+      error_message: message,
     };
   } finally {
     stopHeartbeat = true;
+    clearInterval(flushTimer);
   }
   await heartbeat.catch(() => {});
+
+  // Final flush of whatever is still buffered before we write the result.
+  // The result update below also includes worker_log, but doing one more
+  // flush here ensures any log-side errors during the result update don't
+  // lose lines.
+  await flushLog();
 
   const runtimeSeconds = Math.round((Date.now() - startTs) / 1000);
   const completedAt = new Date().toISOString();
@@ -74,7 +165,7 @@ async function processOneJob(
     runtime_seconds: runtimeSeconds,
     updated_at: completedAt,
     completed_at: completedAt,
-    worker_log: logBuf.join('\n').slice(-64 * 1024),
+    worker_log: logBuf.join('\n').slice(-LOG_BUF_MAX_BYTES),
   };
   if (outcome.branch_name !== undefined) update.branch_name = outcome.branch_name;
   if (outcome.pr_url !== undefined) update.pr_url = outcome.pr_url;
@@ -119,6 +210,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 export async function workerMain(): Promise<void> {
+  installCrashShields();
+
   const supabaseUrl = requireEnv('SUPABASE_URL');
   const serviceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
   const telegramToken = requireEnv('TELEGRAM_BOT_TOKEN');
@@ -177,8 +270,13 @@ const isCli = (() => {
 })();
 
 if (isCli) {
+  // Install shields before workerMain so even fatal boot errors are
+  // captured rather than silently exiting with a non-zero code.
+  installCrashShields();
   workerMain().catch((err) => {
     console.error('[worker] fatal:', err);
     process.exit(1);
   });
 }
+
+export { installCrashShields };
