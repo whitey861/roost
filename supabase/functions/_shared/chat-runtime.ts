@@ -449,6 +449,63 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
           const max = Math.min(10, Math.max(1, Number(tu.input.max_results ?? 5)));
           const hits = await retrieveTopK(client, workspace.id, q, max, 0.3, { embedQueryFn: params.embedQueryFn });
           out = { hits };
+        } else if (toolRow.handler_type === 'internal' && tu.name === 'check_dev_jobs') {
+          const limit = Math.min(20, Math.max(1, Number(tu.input.limit ?? 5)));
+          const statusFilter = typeof tu.input.status === 'string' ? tu.input.status : null;
+          let djq = client
+            .from('dev_jobs')
+            .select('id, task_spec, target_repo, target_branch, status, branch_name, pr_url, pr_number, iterations_used, max_iterations, runtime_seconds, max_runtime_minutes, cost_usd, max_cost_usd, error_message, agent_summary, files_changed, tests_passed, tests_summary, created_at, leased_at, completed_at')
+            .eq('workspace_id', workspace.id)
+            .eq('user_id', params.userId);
+          if (statusFilter) djq = djq.eq('status', statusFilter);
+          const { data: jobRows, error: djErr } = await djq.order('created_at', { ascending: false }).limit(limit);
+          if (djErr) {
+            out = { ok: false, error: `Failed to fetch dev_jobs: ${djErr.message}` };
+          } else {
+            const now = Date.now();
+            const jobs = ((jobRows ?? []) as Array<Record<string, unknown>>).map((j) => {
+              const createdAtMs = typeof j.created_at === 'string' ? new Date(j.created_at).getTime() : null;
+              const leasedAtMs = typeof j.leased_at === 'string' ? new Date(j.leased_at).getTime() : null;
+              const completedAtMs = typeof j.completed_at === 'string' ? new Date(j.completed_at).getTime() : null;
+              const startMs = leasedAtMs ?? createdAtMs;
+              let elapsedMinutes: number | null = null;
+              if (j.status === 'running' && startMs !== null) {
+                elapsedMinutes = Math.max(0, Math.round((now - startMs) / 60000));
+              } else if (j.status === 'queued' && createdAtMs !== null) {
+                elapsedMinutes = Math.max(0, Math.round((now - createdAtMs) / 60000));
+              } else if (completedAtMs !== null && startMs !== null) {
+                elapsedMinutes = Math.max(0, Math.round((completedAtMs - startMs) / 60000));
+              } else if (typeof j.runtime_seconds === 'number') {
+                elapsedMinutes = Math.round(j.runtime_seconds / 60);
+              }
+              const spec = typeof j.task_spec === 'string' ? j.task_spec : '';
+              const taskSpecPreview = spec.length > 240 ? spec.slice(0, 240) + '...' : spec;
+              return {
+                id: j.id,
+                status: j.status,
+                target_repo: j.target_repo,
+                target_branch: j.target_branch,
+                task_spec_preview: taskSpecPreview,
+                branch_name: j.branch_name ?? null,
+                pr_url: j.pr_url ?? null,
+                pr_number: j.pr_number ?? null,
+                iterations_used: j.iterations_used ?? null,
+                max_iterations: j.max_iterations ?? null,
+                cost_usd: j.cost_usd ?? null,
+                max_cost_usd: j.max_cost_usd ?? null,
+                files_changed: j.files_changed ?? null,
+                tests_passed: j.tests_passed ?? null,
+                tests_summary: j.tests_summary ?? null,
+                agent_summary: j.agent_summary ?? null,
+                error_message: j.error_message ?? null,
+                created_at: j.created_at ?? null,
+                leased_at: j.leased_at ?? null,
+                completed_at: j.completed_at ?? null,
+                elapsed_minutes: elapsedMinutes,
+              };
+            });
+            out = { jobs, count: jobs.length };
+          }
         } else {
           out = runMockTool(tu.name, tu.input);
         }

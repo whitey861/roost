@@ -125,6 +125,33 @@ export const TOOLS: ToolDefinition[] = [
     workspaceScope: ['dev'],
   },
   {
+    name: 'check_dev_jobs',
+    description:
+      "List the current user's recent dev_jobs in this workspace. Use when Paul asks about job status (\"is it building?\", \"any progress?\", \"what's still queued?\"). Returns each job's id, status, target repo and branch, a truncated task spec, when it was created/leased/completed, elapsed minutes (running so far, or total runtime), iterations used vs the cap, cost so far vs the cap, and the PR url if there is one. Filter by status if Paul only cares about running or completed work.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'integer',
+          description: 'Maximum jobs to return, newest first.',
+          default: 5,
+          minimum: 1,
+          maximum: 20,
+        },
+        status: {
+          type: 'string',
+          description: 'Optional status filter.',
+          enum: ['queued', 'running', 'completed', 'failed', 'cancelled', 'timeout'],
+        },
+      },
+    },
+    handlerType: 'internal',
+    handlerConfig: {},
+    requiresApprovalDefault: false,
+    isOutbound: false,
+    workspaceScope: ['dev'],
+  },
+  {
     name: 'web_search',
     description:
       'Search the web for current information, news, facts, or anything not in your knowledge base. Use when the user asks about current events, recent developments, or specific facts you need to verify. Executed server-side by Anthropic; results are returned inline with citations.',

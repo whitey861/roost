@@ -59,7 +59,7 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 // of the standard set; everything else stays generic.
 function toolNamesForWorkspace(slug: string): string[] {
   const base = ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'];
-  if (slug === 'dev') return [...base, 'spawn_dev_agent'];
+  if (slug === 'dev') return [...base, 'spawn_dev_agent', 'check_dev_jobs'];
   return base;
 }
 
