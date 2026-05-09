@@ -51,8 +51,41 @@ const HELP_TEXT = [
   '/use <slug> - switch the active workspace',
   '/where - show the active workspace',
   '/reset - start a fresh chat session',
+  '/spawn <owner/repo> [<minutes>] [<cost>] - dev workspace only: queue all user messages in this thread as a dev job, bypassing the agent',
   '/help - show this help',
 ].join('\n');
+
+// Inline mirror of shared/telegram-helpers.ts#parseSpawnArgs. Kept in sync
+// with that module (which is unit-tested) because Deno and Node imports
+// don't share a single source of truth for these helpers.
+function parseSpawnArgsInline(arg: string | null): { repo: string; maxRuntimeMinutes: number; maxCostUsd: number } | { error: string } {
+  const usage = 'Usage: /spawn <owner/repo> [<minutes>] [<cost_usd>]';
+  if (!arg || arg.trim().length === 0) return { error: usage };
+  const parts = arg.trim().split(/\s+/);
+  if (parts.length > 3) return { error: `Too many arguments. ${usage}` };
+  const repo = parts[0]!;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    return { error: `Repo must be in owner/name form. Got: ${repo}` };
+  }
+  let maxRuntimeMinutes = 120;
+  if (parts.length >= 2) {
+    const raw = parts[1]!;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || String(n) !== raw || n < 1 || n > 720) {
+      return { error: 'Minutes must be an integer between 1 and 720.' };
+    }
+    maxRuntimeMinutes = n;
+  }
+  let maxCostUsd = 5.0;
+  if (parts.length >= 3) {
+    const c = Number.parseFloat(parts[2]!);
+    if (!Number.isFinite(c) || c < 0.01 || c > 100) {
+      return { error: 'Cost must be a number between 0.01 and 100.' };
+    }
+    maxCostUsd = c;
+  }
+  return { repo, maxRuntimeMinutes, maxCostUsd };
+}
 
 async function handleStartPairing(chatId: number, telegramUser: TelegramUser, code: string): Promise<Response> {
   const service = serviceRoleClient();
@@ -176,6 +209,9 @@ async function handleSlashCommand(chatId: number, telegramUser: TelegramUser, te
     await sendMessage(chatId, `Switched to ${ws.name}.`);
     return jsonOk({ ok: true });
   }
+  if (text === '/spawn' || text.startsWith('/spawn ')) {
+    return handleSpawn(service, chatId, link, text);
+  }
   if (text.startsWith('/start')) {
     const parts = text.split(/\s+/);
     const code = parts[1];
@@ -185,6 +221,104 @@ async function handleSlashCommand(chatId: number, telegramUser: TelegramUser, te
   }
 
   await sendMessage(chatId, `Unknown command. ${HELP_TEXT}`);
+  return jsonOk({ ok: true });
+}
+
+// /spawn: queue a dev_jobs row directly from the user messages in the
+// current Telegram session. Workspace-gated to slug='dev' (matching the
+// spawn_dev_agent tool's allow-list). Resets the session on success so
+// subsequent messages start a clean thread.
+async function handleSpawn(
+  service: ReturnType<typeof serviceRoleClient>,
+  chatId: number,
+  link: { id: string; user_id: string; current_workspace_id: string | null; current_session_id: string | null },
+  text: string,
+): Promise<Response> {
+  const { data: ws } = await service
+    .from('workspaces')
+    .select('id, slug, name')
+    .eq('id', link.current_workspace_id ?? '')
+    .maybeSingle();
+  if (!ws || ws.slug !== 'dev') {
+    await sendMessage(chatId, '/spawn is only available in the dev workspace. Switch with `/use dev` first.');
+    return jsonOk({ ok: true });
+  }
+
+  const arg = text === '/spawn' ? null : text.slice('/spawn '.length).trim();
+  const parsed = parseSpawnArgsInline(arg);
+  if ('error' in parsed) {
+    await sendMessage(chatId, parsed.error);
+    return jsonOk({ ok: true });
+  }
+
+  if (!link.current_session_id) {
+    await sendMessage(chatId, 'No spec found in this thread. Send the spec text first (one or more messages), then /spawn.');
+    return jsonOk({ ok: true });
+  }
+
+  const { data: msgs, error: mErr } = await service
+    .from('messages')
+    .select('content, created_at')
+    .eq('session_id', link.current_session_id)
+    .eq('role', 'user')
+    .order('created_at', { ascending: true });
+  if (mErr) {
+    await sendMessage(chatId, `Failed to read spec messages: ${mErr.message}`);
+    return jsonOk({ ok: true });
+  }
+  const userMsgs = (msgs ?? []).filter((m: { content: string | null }) => typeof m.content === 'string' && m.content.length > 0);
+  if (userMsgs.length === 0) {
+    await sendMessage(chatId, 'No spec found in this thread. Send the spec text first (one or more messages), then /spawn.');
+    return jsonOk({ ok: true });
+  }
+  const taskSpec = userMsgs.map((m: { content: string }) => m.content).join('\n\n');
+
+  const { data: agent, error: aErr } = await service
+    .from('agents')
+    .select('id')
+    .eq('workspace_id', ws.id)
+    .limit(1)
+    .maybeSingle();
+  if (aErr || !agent) {
+    await sendMessage(chatId, `Failed to find an agent for workspace ${ws.name}.`);
+    return jsonOk({ ok: true });
+  }
+
+  const { data: job, error: jErr } = await service
+    .from('dev_jobs')
+    .insert({
+      workspace_id: ws.id,
+      agent_id: agent.id,
+      session_id: link.current_session_id,
+      user_id: link.user_id,
+      task_spec: taskSpec,
+      target_repo: parsed.repo,
+      target_branch: 'main',
+      max_iterations: 50,
+      max_cost_usd: parsed.maxCostUsd,
+      max_runtime_minutes: parsed.maxRuntimeMinutes,
+      agent_provider: 'claude_code',
+      status: 'queued',
+    })
+    .select('id')
+    .single();
+  if (jErr || !job) {
+    await sendMessage(chatId, `Failed to queue dev job: ${jErr?.message ?? 'unknown error'}`);
+    return jsonOk({ ok: true });
+  }
+
+  await service.from('telegram_links').update({ current_session_id: null }).eq('id', link.id);
+
+  await sendMessage(
+    chatId,
+    [
+      `Queued dev job ${job.id}.`,
+      `Spec: ${taskSpec.length} chars from ${userMsgs.length} message(s).`,
+      `Repo: ${parsed.repo}`,
+      `Limits: ${parsed.maxRuntimeMinutes} min, $${parsed.maxCostUsd.toFixed(2)}.`,
+      'Session reset. Your next message starts a fresh thread.',
+    ].join('\n'),
+  );
   return jsonOk({ ok: true });
 }
 
