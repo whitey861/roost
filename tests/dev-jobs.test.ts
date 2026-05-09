@@ -176,6 +176,182 @@ describe('chat runtime: worker_job dispatch', () => {
   });
 });
 
+describe('check_dev_jobs tool', () => {
+  it('exists in the TOOLS registry as an internal handler scoped to dev', () => {
+    const t = TOOLS.find((x) => x.name === 'check_dev_jobs');
+    expect(t).toBeTruthy();
+    expect(t?.handlerType).toBe('internal');
+    expect(t?.requiresApprovalDefault).toBe(false);
+    expect(t?.isOutbound).toBe(false);
+    expect(t?.workspaceScope).toEqual(['dev']);
+  });
+
+  it('is on the dev agent allow-list and not on the others', () => {
+    const dev = AGENTS.find((a) => a.workspaceSlug === 'dev')!;
+    expect(dev.toolNames).toContain('check_dev_jobs');
+    for (const other of AGENTS.filter((a) => a.workspaceSlug !== 'dev')) {
+      expect(other.toolNames).not.toContain('check_dev_jobs');
+    }
+  });
+
+  it('returns the user\'s recent jobs scoped to the workspace, newest first', async () => {
+    const fx = seedFakeDb();
+    const otherUserId = '00000000-0000-0000-0000-000000000099';
+    const now = Date.now();
+    const minsAgo = (n: number) => new Date(now - n * 60000).toISOString();
+
+    fx.db.tableRows('dev_jobs').push(
+      {
+        id: 'job-running',
+        workspace_id: fx.workspaceId,
+        user_id: fx.userId,
+        agent_id: fx.agentId,
+        task_spec: 'Build a counter module in TypeScript with tests.',
+        target_repo: 'whitey861/roost-test',
+        target_branch: 'main',
+        status: 'running',
+        max_iterations: 50,
+        iterations_used: 0,
+        max_cost_usd: 5,
+        cost_usd: 0,
+        created_at: minsAgo(20),
+        leased_at: minsAgo(18),
+        completed_at: null,
+        pr_url: null,
+      },
+      {
+        id: 'job-done',
+        workspace_id: fx.workspaceId,
+        user_id: fx.userId,
+        agent_id: fx.agentId,
+        task_spec: 'Earlier finished job.',
+        target_repo: 'whitey861/roost-test',
+        target_branch: 'main',
+        status: 'completed',
+        iterations_used: 7,
+        runtime_seconds: 3600,
+        cost_usd: 1.23,
+        created_at: minsAgo(180),
+        leased_at: minsAgo(178),
+        completed_at: minsAgo(118),
+        pr_url: 'https://github.com/whitey861/roost-test/pull/42',
+        pr_number: 42,
+      },
+      {
+        id: 'job-other-user',
+        workspace_id: fx.workspaceId,
+        user_id: otherUserId,
+        agent_id: fx.agentId,
+        task_spec: 'Someone else\'s job.',
+        target_repo: 'whitey861/roost-test',
+        status: 'running',
+        created_at: minsAgo(5),
+        leased_at: minsAgo(5),
+      },
+    );
+
+    const anthropic = new FakeAnthropic([
+      {
+        toolUses: [{ id: 'call_check_1', name: 'check_dev_jobs', input: {} }],
+        stopReason: 'tool_use',
+        inputTokens: 20,
+        outputTokens: 5,
+      },
+      { text: 'Here you go.', stopReason: 'end_turn', inputTokens: 30, outputTokens: 3 },
+    ]);
+
+    const events = await collect(runChat({
+      client: client(fx.db),
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'is it building?',
+      embedQueryFn: fakeQueryEmbedder,
+    }));
+
+    const toolResults = events.filter((e) => e.type === 'tool_result');
+    expect(toolResults).toHaveLength(1);
+    const out = (toolResults[0] as { output: Record<string, unknown> }).output;
+    const jobs = out.jobs as Array<Record<string, unknown>>;
+    expect(out.count).toBe(2);
+    expect(jobs.map((j) => j.id)).toEqual(['job-running', 'job-done']);
+
+    const running = jobs[0]!;
+    expect(running.status).toBe('running');
+    expect(running.target_repo).toBe('whitey861/roost-test');
+    expect(running.task_spec_preview).toBe('Build a counter module in TypeScript with tests.');
+    expect(typeof running.elapsed_minutes).toBe('number');
+    expect(running.elapsed_minutes).toBeGreaterThanOrEqual(17);
+    expect(running.elapsed_minutes).toBeLessThanOrEqual(19);
+
+    const done = jobs[1]!;
+    expect(done.status).toBe('completed');
+    expect(done.pr_url).toBe('https://github.com/whitey861/roost-test/pull/42');
+    expect(done.pr_number).toBe(42);
+    expect(done.elapsed_minutes).toBe(60);
+  });
+
+  it('honours limit and status filters', async () => {
+    const fx = seedFakeDb();
+    const now = Date.now();
+    const minsAgo = (n: number) => new Date(now - n * 60000).toISOString();
+    fx.db.tableRows('dev_jobs').push(
+      { id: 'a', workspace_id: fx.workspaceId, user_id: fx.userId, agent_id: fx.agentId, task_spec: 't', target_repo: 'r', status: 'queued', created_at: minsAgo(1) },
+      { id: 'b', workspace_id: fx.workspaceId, user_id: fx.userId, agent_id: fx.agentId, task_spec: 't', target_repo: 'r', status: 'running', created_at: minsAgo(2), leased_at: minsAgo(2) },
+      { id: 'c', workspace_id: fx.workspaceId, user_id: fx.userId, agent_id: fx.agentId, task_spec: 't', target_repo: 'r', status: 'completed', created_at: minsAgo(3), leased_at: minsAgo(3), completed_at: minsAgo(1) },
+      { id: 'd', workspace_id: fx.workspaceId, user_id: fx.userId, agent_id: fx.agentId, task_spec: 't', target_repo: 'r', status: 'failed', created_at: minsAgo(4) },
+    );
+
+    const anthropic = new FakeAnthropic([
+      {
+        toolUses: [{ id: 'call_check_2', name: 'check_dev_jobs', input: { status: 'running', limit: 1 } }],
+        stopReason: 'tool_use',
+        inputTokens: 5,
+        outputTokens: 2,
+      },
+      { text: 'ok', stopReason: 'end_turn', inputTokens: 5, outputTokens: 1 },
+    ]);
+
+    const events = await collect(runChat({
+      client: client(fx.db),
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'still running?',
+      embedQueryFn: fakeQueryEmbedder,
+    }));
+    const out = (events.filter((e) => e.type === 'tool_result')[0] as { output: Record<string, unknown> }).output;
+    const jobs = out.jobs as Array<Record<string, unknown>>;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.id).toBe('b');
+  });
+
+  it('does not require approval and does not insert outbound_actions', async () => {
+    const fx = seedFakeDb();
+    const anthropic = new FakeAnthropic([
+      {
+        toolUses: [{ id: 'call_check_3', name: 'check_dev_jobs', input: {} }],
+        stopReason: 'tool_use',
+        inputTokens: 5,
+        outputTokens: 2,
+      },
+      { text: 'no jobs.', stopReason: 'end_turn', inputTokens: 5, outputTokens: 2 },
+    ]);
+    await collect(runChat({
+      client: client(fx.db),
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'anything queued?',
+      embedQueryFn: fakeQueryEmbedder,
+    }));
+    expect(fx.db.tableRows('outbound_actions')).toHaveLength(0);
+  });
+});
+
 describe('migrations: dev_jobs and worker_job', () => {
   it('migration files exist with correct numbering', async () => {
     const { readdirSync } = await import('node:fs');
