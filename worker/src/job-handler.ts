@@ -127,24 +127,24 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
       }
     }
 
-    // 3. Drive Claude Code.
+    // 3. Drive Claude Code. The CLI reads the prompt from stdin in --print
+    // mode; we still write PROMPT.md to disk for post-mortem inspection if
+    // the job fails, but the live process gets the bytes over the pipe.
     const promptFile = path.join(workDir, 'PROMPT.md');
-    await fs.writeFile(promptFile, buildClaudePrompt(job), 'utf8');
+    const promptText = buildClaudePrompt(job);
+    await fs.writeFile(promptFile, promptText, 'utf8');
 
     const runtimeMs = Math.max(60_000, (job.max_runtime_minutes ?? 120) * 60 * 1000);
     deps.log(`[claude] starting, timeout ${runtimeMs}ms`);
-    const claudeRes = await exec('claude', ['--print', '--input-file', promptFile], {
+
+    const claudeRes = await exec('claude', ['--print'], {
       cwd: repoDir,
       env: {
         ...env,
-        ANTHROPIC_API_KEY: anthropicKey,
-        // Don't leak Roost-internal env to the child process.
-        SUPABASE_SERVICE_ROLE_KEY: undefined,
-        GITHUB_PAT: undefined,
-        TELEGRAM_BOT_TOKEN: undefined,
       },
       timeoutMs: runtimeMs,
       onLog: (line) => deps.log(line),
+      stdin: promptText,
     });
 
     if (claudeRes.timedOut) {
