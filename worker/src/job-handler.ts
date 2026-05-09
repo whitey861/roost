@@ -106,22 +106,33 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
     const cloneUrl = `https://x-access-token:${githubPat}@github.com/${job.target_repo}.git`;
     const cloneRes = await exec('git', ['clone', cloneUrl, repoDir], {
       timeoutMs: 5 * 60 * 1000,
+      onLog: (line) => deps.log(`[clone] ${redactToken(line, githubPat)}`),
     });
     if (cloneRes.exitCode !== 0) {
       throw new Error(`git clone failed: ${trimErr(cloneRes)}`);
     }
 
     // Configure git identity for the dev agent's commits.
-    await exec('git', ['config', 'user.email', 'roost-dev-agent@noreply.local'], { cwd: repoDir });
-    await exec('git', ['config', 'user.name', 'Roost Dev Agent'], { cwd: repoDir });
+    await exec('git', ['config', 'user.email', 'roost-dev-agent@noreply.local'], {
+      cwd: repoDir,
+      onLog: (line) => deps.log(`[git config] ${line}`),
+    });
+    await exec('git', ['config', 'user.name', 'Roost Dev Agent'], {
+      cwd: repoDir,
+      onLog: (line) => deps.log(`[git config] ${line}`),
+    });
 
     // 2. Branch.
     const checkoutRes = await exec('git', ['checkout', '-b', branchName, `origin/${baseBranch}`], {
       cwd: repoDir,
+      onLog: (line) => deps.log(`[checkout] ${line}`),
     });
     if (checkoutRes.exitCode !== 0) {
       // Try without origin/ prefix in case the base branch is local-only.
-      const fallback = await exec('git', ['checkout', '-b', branchName], { cwd: repoDir });
+      const fallback = await exec('git', ['checkout', '-b', branchName], {
+        cwd: repoDir,
+        onLog: (line) => deps.log(`[checkout] ${line}`),
+      });
       if (fallback.exitCode !== 0) {
         throw new Error(`branch creation failed: ${trimErr(fallback)}`);
       }
@@ -144,12 +155,24 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
         ...env,
       },
       timeoutMs: runtimeMs,
-      onLog: (line) => deps.log(line),
+      onLog: (line) => deps.log(`[claude] ${line}`),
       stdin: promptText,
     });
 
+    deps.log(
+      `[claude] exited code=${claudeRes.exitCode} signal=${claudeRes.signal ?? 'none'} timedOut=${claudeRes.timedOut} spawnError=${claudeRes.spawnError ?? 'none'}`,
+    );
+
     if (claudeRes.timedOut) {
       throw new Error(`Claude Code timed out after ${runtimeMs}ms`);
+    }
+    if (claudeRes.spawnError) {
+      throw new Error(`Claude Code crashed: ${claudeRes.spawnError}`);
+    }
+    if (claudeRes.exitCode !== 0) {
+      throw new Error(
+        `Claude Code exited non-zero (code=${claudeRes.exitCode}, signal=${claudeRes.signal ?? 'none'}): ${trimErr(claudeRes)}`,
+      );
     }
 
     // 4. Parse the result block.
@@ -186,7 +209,10 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
     }
 
     // 6. Stage, commit, push.
-    await exec('git', ['add', '-A'], { cwd: repoDir });
+    await exec('git', ['add', '-A'], {
+      cwd: repoDir,
+      onLog: (line) => deps.log(`[git add] ${line}`),
+    });
     const statusRes = await exec('git', ['status', '--porcelain'], { cwd: repoDir });
     const hasChanges = statusRes.stdout.trim().length > 0;
     if (!hasChanges) {
@@ -197,13 +223,19 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
         throw new Error('No changes were made by the dev agent.');
       }
     } else {
-      const commitRes = await exec('git', ['commit', '-m', result.commitMessage], { cwd: repoDir });
+      const commitRes = await exec('git', ['commit', '-m', result.commitMessage], {
+        cwd: repoDir,
+        onLog: (line) => deps.log(`[commit] ${line}`),
+      });
       if (commitRes.exitCode !== 0) {
         throw new Error(`git commit failed: ${trimErr(commitRes)}`);
       }
     }
 
-    const pushRes = await exec('git', ['push', '-u', 'origin', branchName], { cwd: repoDir });
+    const pushRes = await exec('git', ['push', '-u', 'origin', branchName], {
+      cwd: repoDir,
+      onLog: (line) => deps.log(`[push] ${line}`),
+    });
     if (pushRes.exitCode !== 0) {
       throw new Error(`git push failed: ${trimErr(pushRes)}`);
     }
@@ -259,6 +291,13 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
 
 function trimErr(res: ExecResult): string {
   return (res.stderr || res.stdout).trim().slice(-500);
+}
+
+// Strip a sensitive token out of a log line. Used for clone output where the
+// PAT is inlined into the URL and could otherwise leak into worker_log.
+function redactToken(line: string, token: string): string {
+  if (!token) return line;
+  return line.split(token).join('***');
 }
 
 export function parsePrNumber(url: string): number | null {
