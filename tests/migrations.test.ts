@@ -41,6 +41,7 @@ describe('migrations', () => {
       'sessions', 'messages', 'jobs', 'agent_runs', 'artifacts', 'outbound_actions',
       'telegram_links', 'telegram_pairing_codes', 'audit_log',
       'knowledge_documents', 'knowledge_chunks',
+      'dev_jobs', 'dev_job_notifications',
     ];
     for (const t of expectedTables) {
       expect(all).toContain(`public.${t}`);

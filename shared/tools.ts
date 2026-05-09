@@ -84,6 +84,47 @@ export const TOOLS: ToolDefinition[] = [
     workspaceScope: ['*'],
   },
   {
+    name: 'spawn_dev_agent',
+    description:
+      'Queue an autonomous dev job. The dev agent will clone a repo, do the requested work using Claude Code, run tests, and open a PR for human review. Use this when the user asks for code to be written, a bug fixed, a feature built, or any work that should result in a PR. The agent works asynchronously and notifies via the configured channel when done. Always confirm scope with the user before invoking.',
+    inputSchema: {
+      type: 'object',
+      required: ['task_spec', 'target_repo'],
+      properties: {
+        task_spec: {
+          type: 'string',
+          description:
+            'The full task description for the dev agent. Be specific. Include acceptance criteria, constraints, file targets if known. The dev agent has no other context, so this is everything it gets.',
+        },
+        target_repo: {
+          type: 'string',
+          description:
+            'GitHub repo in owner/name format. Must be one Roost has been granted push access to.',
+        },
+        target_branch: {
+          type: 'string',
+          description: 'Base branch to cut the dev branch from. Defaults to main.',
+          default: 'main',
+        },
+        max_cost_usd: {
+          type: 'number',
+          description: 'Maximum spend on Claude Code tokens for this job. Default 5.00.',
+          default: 5.0,
+        },
+        max_runtime_minutes: {
+          type: 'integer',
+          description: 'Wall-clock minutes before the job is killed. Default 120.',
+          default: 120,
+        },
+      },
+    },
+    handlerType: 'worker_job',
+    handlerConfig: { provider: 'claude_code' },
+    requiresApprovalDefault: false,
+    isOutbound: true,
+    workspaceScope: ['dev'],
+  },
+  {
     name: 'web_search',
     description:
       'Search the web for current information, news, facts, or anything not in your knowledge base. Use when the user asks about current events, recent developments, or specific facts you need to verify. Executed server-side by Anthropic; results are returned inline with citations.',
