@@ -1,0 +1,41 @@
+# DigitalOcean App Platform spec for the Roost dev-agent worker.
+#
+# Apply with: doctl apps create --spec worker/.do/app.yaml
+# Or:         doctl apps update <app-id> --spec worker/.do/app.yaml
+#
+# The worker is a long-running background process: no inbound HTTP. App
+# Platform's "worker" component type fits that shape.
+
+name: roost-worker
+region: syd
+
+workers:
+  - name: dev-agent
+    instance_count: 1
+    instance_size_slug: basic-xs
+    dockerfile_path: worker/Dockerfile
+    source_dir: /
+    github:
+      repo: whitey861/roost
+      branch: main
+      deploy_on_push: true
+    envs:
+      - key: SUPABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: GITHUB_PAT
+        scope: RUN_TIME
+        type: SECRET
+      - key: TELEGRAM_BOT_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: WORKER_POLL_INTERVAL_MS
+        scope: RUN_TIME
+        type: GENERAL
+        value: "10000"

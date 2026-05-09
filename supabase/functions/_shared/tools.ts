@@ -11,7 +11,7 @@ export interface ToolRow {
   name: string;
   description: string | null;
   input_schema: Record<string, unknown>;
-  handler_type: 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server';
+  handler_type: 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server' | 'worker_job';
   handler_config: Record<string, unknown>;
   requires_approval_default: boolean;
   is_outbound: boolean;

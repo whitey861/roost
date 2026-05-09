@@ -359,6 +359,55 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
         continue;
       }
 
+      // worker_job tools don't run inline. They insert a dev_jobs row and
+      // return a queued tool_result. A separate worker process picks the job
+      // up and posts a notification when the PR is ready. The PR review is
+      // the approval gate, so we skip the outbound approval queue here.
+      if (toolRow.handler_type === 'worker_job') {
+        const cfg = (toolRow.handler_config ?? {}) as Record<string, unknown>;
+        const provider = typeof cfg.provider === 'string' ? cfg.provider : 'claude_code';
+        const taskSpec = String(tu.input.task_spec ?? '');
+        const targetRepo = String(tu.input.target_repo ?? '');
+        const targetBranch = typeof tu.input.target_branch === 'string' ? tu.input.target_branch : 'main';
+        const maxCostUsd = typeof tu.input.max_cost_usd === 'number' ? tu.input.max_cost_usd : 5.0;
+        const maxRuntimeMinutes = typeof tu.input.max_runtime_minutes === 'number' ? tu.input.max_runtime_minutes : 120;
+        const { data: jobRow, error: jerr } = await client
+          .from('dev_jobs')
+          .insert({
+            workspace_id: workspace.id,
+            agent_id: agent.id,
+            session_id: sessionId,
+            user_id: params.userId,
+            task_spec: taskSpec,
+            target_repo: targetRepo,
+            target_branch: targetBranch,
+            max_cost_usd: maxCostUsd,
+            max_runtime_minutes: maxRuntimeMinutes,
+            agent_provider: provider,
+            agent_provider_config: cfg,
+            status: 'queued',
+          })
+          .select('id')
+          .single();
+        if (jerr || !jobRow) {
+          const out = { ok: false, error: `Failed to queue dev job: ${jerr?.message ?? 'unknown'}` };
+          yield { type: 'tool_result', tool_call_id: tu.id, output: out };
+          await persistToolResult(client, sessionId, tu.id, tu.name, out);
+          toolResultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out), is_error: true });
+          continue;
+        }
+        const jobId = (jobRow as { id: string }).id;
+        const out = {
+          status: 'queued',
+          job_id: jobId,
+          message: `Queued dev job ${jobId}. The dev agent will work on this asynchronously and notify you via Telegram when the PR is ready. Estimated runtime 30-60 minutes.`,
+        };
+        yield { type: 'tool_result', tool_call_id: tu.id, output: out };
+        await persistToolResult(client, sessionId, tu.id, tu.name, out);
+        toolResultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(out) });
+        continue;
+      }
+
       const decision = await approvalRequired(client, agent.id, toolRow, workspace.approval_mode);
 
       if (decision.requiresApproval) {

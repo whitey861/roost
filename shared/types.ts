@@ -3,7 +3,7 @@
 
 export type WorkspaceApprovalMode = 'all_outbound' | 'allowlist' | 'autonomous';
 export type WorkspaceRole = 'owner' | 'admin' | 'approver' | 'member' | 'viewer';
-export type ToolHandlerType = 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server';
+export type ToolHandlerType = 'mock' | 'internal' | 'http' | 'edge_function' | 'anthropic_server' | 'worker_job';
 export type ChannelType = 'web' | 'telegram';
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'system_event';
 export type JobStatus = 'queued' | 'running' | 'complete' | 'failed' | 'cancelled' | 'awaiting_approval';

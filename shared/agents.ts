@@ -55,13 +55,21 @@ export const WORKSPACES: WorkspaceSeed[] = [
 //   update agents set model = 'claude-opus-4-7' where name = '...';
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
+// Tool allow-list per agent. The dev workspace gets spawn_dev_agent on top
+// of the standard set; everything else stays generic.
+function toolNamesForWorkspace(slug: string): string[] {
+  const base = ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'];
+  if (slug === 'dev') return [...base, 'spawn_dev_agent'];
+  return base;
+}
+
 export const AGENTS: AgentSeed[] = WORKSPACES.map((ws) => ({
   workspaceSlug: ws.slug,
   name: `${ws.name} Assistant`,
   roleDescription: `Default assistant for the ${ws.name} workspace.`,
   promptFile: `prompts/${ws.slug}.md`,
   model: DEFAULT_MODEL,
-  toolNames: ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'],
+  toolNames: toolNamesForWorkspace(ws.slug),
 }));
 
 // Resolve a prompt file path relative to the repository root, regardless of

@@ -35,3 +35,15 @@ jobs:
 
       - name: Tests
         run: npm test
+
+      - name: Worker dependencies
+        working-directory: worker
+        run: npm install
+
+      - name: Worker typecheck
+        working-directory: worker
+        run: npm run typecheck
+
+      - name: Worker tests
+        working-directory: worker
+        run: npm test
