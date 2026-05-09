@@ -137,8 +137,11 @@ async function runRealJob(job: DevJob, deps: RunDevJobDeps): Promise<JobOutcome>
     const runtimeMs = Math.max(60_000, (job.max_runtime_minutes ?? 120) * 60 * 1000);
     deps.log(`[claude] starting, timeout ${runtimeMs}ms`);
 
+
     const claudeRes = await exec('claude', ['--print', '--dangerously-skip-permissions'], {
     cwd: repoDir,
+
+>>>> main
       env: {
         ...env,
       },
