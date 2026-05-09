@@ -6,7 +6,7 @@
 #
 # Pinning: bump CLAUDE_CODE_VERSION and GH_VERSION deliberately so changes
 # are visible in PRs.
-FROM node:20-bullseye-slim
+FROM node:22-bullseye-slim
 
 ARG CLAUDE_CODE_VERSION=2.0.0
 ARG GH_VERSION=2.69.0
