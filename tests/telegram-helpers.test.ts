@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { generatePairingCode, parseApprovalCallback, parseSlashCommand } from '../shared/telegram-helpers.js';
+import {
+  generatePairingCode,
+  parseApprovalCallback,
+  parseSlashCommand,
+  parseSpawnArgs,
+} from '../shared/telegram-helpers.js';
 
 describe('parseSlashCommand', () => {
   it('parses /help with no arg', () => {
@@ -30,6 +35,69 @@ describe('parseApprovalCallback', () => {
   });
   it('preserves uuids that contain colons', () => {
     expect(parseApprovalCallback('act:approve:a:b:c')).toEqual({ op: 'approve', actionId: 'a:b:c' });
+  });
+});
+
+describe('parseSpawnArgs', () => {
+  it('rejects empty arg with usage', () => {
+    const r = parseSpawnArgs(null);
+    expect('error' in r && r.error.startsWith('Usage:')).toBe(true);
+    const r2 = parseSpawnArgs('   ');
+    expect('error' in r2 && r2.error.startsWith('Usage:')).toBe(true);
+  });
+
+  it('parses repo only with defaults', () => {
+    expect(parseSpawnArgs('whitey861/roost-test')).toEqual({
+      repo: 'whitey861/roost-test',
+      maxRuntimeMinutes: 120,
+      maxCostUsd: 5.0,
+    });
+  });
+
+  it('parses repo + minutes', () => {
+    expect(parseSpawnArgs('whitey861/roost-test 180')).toEqual({
+      repo: 'whitey861/roost-test',
+      maxRuntimeMinutes: 180,
+      maxCostUsd: 5.0,
+    });
+  });
+
+  it('parses repo + minutes + cost', () => {
+    expect(parseSpawnArgs('whitey861/roost-test 180 10')).toEqual({
+      repo: 'whitey861/roost-test',
+      maxRuntimeMinutes: 180,
+      maxCostUsd: 10.0,
+    });
+  });
+
+  it('accepts decimal cost', () => {
+    const r = parseSpawnArgs('a/b 60 0.5');
+    expect(r).toEqual({ repo: 'a/b', maxRuntimeMinutes: 60, maxCostUsd: 0.5 });
+  });
+
+  it('rejects malformed repo', () => {
+    const r = parseSpawnArgs('not-a-repo');
+    expect('error' in r && r.error.includes('owner/name')).toBe(true);
+  });
+
+  it('rejects non-integer minutes', () => {
+    const r = parseSpawnArgs('a/b 30.5');
+    expect('error' in r && r.error.includes('Minutes')).toBe(true);
+  });
+
+  it('rejects out-of-range minutes', () => {
+    expect('error' in parseSpawnArgs('a/b 0')).toBe(true);
+    expect('error' in parseSpawnArgs('a/b 721')).toBe(true);
+  });
+
+  it('rejects out-of-range cost', () => {
+    expect('error' in parseSpawnArgs('a/b 60 0')).toBe(true);
+    expect('error' in parseSpawnArgs('a/b 60 101')).toBe(true);
+  });
+
+  it('rejects extra args', () => {
+    const r = parseSpawnArgs('a/b 60 5 extra');
+    expect('error' in r && r.error.includes('Too many')).toBe(true);
   });
 });
 
