@@ -13,8 +13,10 @@
 //        d. Sleep for POLL_INTERVAL_MS.
 
 import { randomUUID } from 'node:crypto';
+import { writeSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { requireEnv, optionalEnv, envInt } from './env.js';
+import { requireEnv, envInt } from './env.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   extendLease,
@@ -32,6 +34,37 @@ const POLL_INTERVAL_MS = 10 * 1000;
 const LOG_FLUSH_INTERVAL_MS = 2000;
 const LOG_BUF_MAX_BYTES = 64 * 1024;
 
+// Synchronous log helper. Bypasses Node's async stdout buffering so a line
+// is on disk before we hand control back to anything that might exit. Use
+// this in crash/exit paths where console.log lines have been observed to
+// vanish (the worker's "exit code 128 with no preceding logs" pattern).
+function syncLog(line: string): void {
+  try {
+    writeSync(1, `${line}\n`);
+  } catch {
+    // stdout itself is broken — nothing useful left to do.
+  }
+}
+
+function syncErr(line: string): void {
+  try {
+    writeSync(2, `${line}\n`);
+  } catch {
+    // stderr is broken — fall through.
+  }
+}
+
+// Force stdout/stderr into blocking mode. By default Node writes to a pipe
+// (which is what App Platform gives us) asynchronously, so an abrupt exit
+// drops any in-flight writes. Setting the handles to blocking makes
+// console.log behave the way operators expect in a container.
+function setStdioBlocking(): void {
+  for (const stream of [process.stdout, process.stderr] as const) {
+    const handle = (stream as unknown as { _handle?: { setBlocking?: (b: boolean) => void } })._handle;
+    handle?.setBlocking?.(true);
+  }
+}
+
 // Install a single set of last-resort handlers for the worker process. These
 // fire in cases like an unhandled rejection from a fire-and-forget promise
 // or an EPIPE on a child process pipe with no listener attached (we attach
@@ -41,20 +74,52 @@ let crashShieldsInstalled = false;
 function installCrashShields(): void {
   if (crashShieldsInstalled) return;
   crashShieldsInstalled = true;
+  setStdioBlocking();
   process.on('uncaughtException', (err: Error) => {
-    console.error(
-      `[worker] uncaughtException: ${err.message}\n${err.stack ?? ''}`,
-    );
+    syncErr(`[worker] uncaughtException: ${err.message}\n${err.stack ?? ''}`);
   });
   process.on('unhandledRejection', (reason: unknown) => {
     const msg = reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason);
-    console.error(`[worker] unhandledRejection: ${msg}`);
+    syncErr(`[worker] unhandledRejection: ${msg}`);
   });
   // SIGPIPE shouldn't kill us either. Node masks SIGPIPE by default for
   // most stdio configurations, but we make it explicit.
   process.on('SIGPIPE', () => {
-    console.error('[worker] received SIGPIPE, ignoring');
+    syncErr('[worker] received SIGPIPE, ignoring');
   });
+  // EPIPE on the parent's own stdout/stderr (e.g. App Platform closing the
+  // log pipe) would otherwise propagate as an uncaughtException and kill
+  // the worker. Swallow it.
+  for (const [name, stream] of [['stdout', process.stdout], ['stderr', process.stderr]] as const) {
+    stream.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE') return;
+      syncErr(`[worker] ${name} error: ${err.message}`);
+    });
+  }
+  // Capture exit cause so a silent death leaves a footprint in the log.
+  // 'exit' fires synchronously from inside Node's exit path.
+  process.on('exit', (code) => {
+    syncErr(`[worker] process exit code=${code}`);
+  });
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'] as const) {
+    process.on(sig, () => {
+      syncErr(`[worker] received ${sig}, exiting`);
+      process.exit(0);
+    });
+  }
+}
+
+// DigitalOcean App Platform substitutes a small set of bindable variables
+// like ${APP_DOMAIN} at deploy time. If someone wires an env var to a
+// non-bindable token (e.g. WORKER_INSTANCE_ID=${APP_INSTANCE_ID}), the
+// literal text passes through and ends up in our logs. Detect that and
+// substitute something useful so operators can tell instances apart.
+export function resolveWorkerId(raw: string | undefined): string {
+  if (!raw || raw === '') return `worker-${hostname()}-${randomUUID().slice(0, 8)}`;
+  if (/^\$\{[^}]+\}$/.test(raw)) {
+    return `worker-${hostname()}-${randomUUID().slice(0, 8)}`;
+  }
+  return raw;
 }
 
 async function processOneJob(
@@ -215,21 +280,21 @@ export async function workerMain(): Promise<void> {
   const supabaseUrl = requireEnv('SUPABASE_URL');
   const serviceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
   const telegramToken = requireEnv('TELEGRAM_BOT_TOKEN');
-  const workerId = optionalEnv('WORKER_INSTANCE_ID', `worker-${randomUUID()}`);
+  const workerId = resolveWorkerId(process.env.WORKER_INSTANCE_ID);
   const pollMs = envInt('WORKER_POLL_INTERVAL_MS', POLL_INTERVAL_MS);
 
   const client = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  console.log(`[worker] booted, instance=${workerId}`);
+  syncLog(`[worker] booted, instance=${workerId}, pid=${process.pid}`);
 
   // Recover stranded leases at boot.
   try {
     const recovered = await recoverExpiredLeases(client);
-    if (recovered.length > 0) console.log(`[worker] recovered ${recovered.length} stranded jobs: ${recovered.join(', ')}`);
+    if (recovered.length > 0) syncLog(`[worker] recovered ${recovered.length} stranded jobs: ${recovered.join(', ')}`);
   } catch (err) {
-    console.error(`[worker] boot recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+    syncErr(`[worker] boot recovery failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Run forever.
@@ -274,7 +339,8 @@ if (isCli) {
   // captured rather than silently exiting with a non-zero code.
   installCrashShields();
   workerMain().catch((err) => {
-    console.error('[worker] fatal:', err);
+    const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
+    syncErr(`[worker] fatal: ${msg}`);
     process.exit(1);
   });
 }
