@@ -46,6 +46,11 @@ export const WORKSPACES: WorkspaceSeed[] = [
     name: 'Dev',
     description: 'Engineering: code reviews, architecture, automation, and tooling.',
   },
+  {
+  slug: 'oarfish',
+  name: 'Oar Fish',
+  description: 'Oar Fish streetwear label: brand voice, content production, drops, ads, email, analytics.',
+  },
 ];
 
 // Default model for newly seeded agents. Sonnet 4.6 covers the bulk of Roost
