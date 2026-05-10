@@ -1,127 +1,111 @@
-# Oar Fish Image Generation Prompts
+# Oar Fish Image Generation: Recraft Workflow
 
-Starter templates for Midjourney v6/v7 and Flux. The goal: outputs that match the kid-drawn doctrine. The benchmark: the current Oar Fish hoodie illustration. If a prompt produces anything glossier, smoother, or more "professional" than that, it has failed.
+The Oar Fish kid-drawn doctrine is locked in a custom Recraft Brand Style trained on the existing Vol. 01 marker drawings. This replaces the earlier Midjourney and Flux approach, which had to fight AI defaults at every prompt. With a trained style, prompts get shorter, output stays consistent, and calibration becomes a one-time setup instead of an ongoing tax.
 
-These are starting points, not pre-tested winners. The first job is to run them, score, iterate, and lock the working versions in `oarfish-winning-prompts.md`.
+## The trained style
 
-## Core style anchor
+Name in Recraft: `Oar Fish marker` (adjust if named differently in the account)
 
-Paste this into every prompt before the subject description.
+References used for training:
 
-> Hand-drawn with permanent marker on white sketchbook paper, scanned. Wonky linework, uneven proportions, visible marker bleed and ink pooling. Loose cross-hatching for shading. Limited palette: deep purple ink with one accent colour. The drawing looks like a talented teenager with a sketchbook drew it, not a commercial illustrator. Raw and unrefined. Zine art energy. Garbage Pail Kids and 1990s skate zine references. No vector cleanup, no smooth gradients, no symmetry.
+- Oar Fish hoodie illustration
+- Forest Ghost
+- Desert Wanderer
+- Sunwalker
+- Anglerfish Cap art
+- Horned Beast Tee art
 
-## Group A: Creature designs
+The style handles, automatically, on every generation:
 
-### A1: Main line creature
+- Marker and ink texture
+- Wonky linework and kid-drawn looseness
+- Palette (Oar Fish purples, navy, beige, olive, oxblood)
+- Paper background and visible bleed
 
-> [Style anchor]. A [creature, e.g. four-eyed deep-sea anglerfish with kelp-tangled fins], full body, single subject centred. Decorative marks around it: small bubbles, scattered stars, scratchy lines. Marker drawing on paper background, deckle edge faintly visible.
+The prompt only handles what the creature is and how it sits on the page.
 
-Parameters:
-- Midjourney: `--ar 1:1 --stylize 100 --weird 50`
-- Flux: Flux Pro, prompt strength 0.85
-- Negative: no vector art, no clean illustration, no AI gloss, no symmetry, no photoreal, no smooth gradients
+## Prompt patterns
 
-### A2: Growl creature (darker line)
+Format: `[creature or subject] + [composition] + [optional palette nudge]`
 
-> [Style anchor], shifted darker. A [creature, e.g. hairy man with two long teeth and pale eyes, hunched in a doorway]. Heavier ink, more cross-hatching, oxblood accent instead of purple. The kid had a nightmare. Same hand, meaner subject. No gore, suggestion only.
+Short, literal, no negative prompts needed in most cases. The trained style already knows what Oar Fish looks like.
 
-Parameters:
-- Midjourney: `--ar 1:1 --stylize 50 --weird 100`
-- Flux: Flux Pro, prompt strength 0.9
-- Negative: above plus no realistic horror, no splatter, no shock gore
+## Group A: Main line creatures
 
-### A3: Phrase piece graphic
+> A [creature, e.g. small four-eyed cat with tangled limbs], full body, single subject centred on white paper.
 
-> [Style anchor], for a text-only garment graphic. Hand-lettered phrase "[phrase]" in marker, all caps or all lowercase, wonky baseline, uneven kerning. One small decorative mark beside or below the text (star, eye, question mark, asterisk). White paper background.
+Variations:
 
-Parameters:
-- Midjourney: `--ar 1:1 --stylize 50`
-- Flux: Flux Pro, prompt strength 0.85
-- Negative: no typeset fonts, no perfect lettering, no clean vector, no logo design
+- Add "half-emerging from [environment]" for atmospheric pieces
+- Add "shown from [angle]" for compositional variety
+- Add "with [bubbles | stars | scratchy lines] around it" for finished hoodie graphics
 
-Note: hand-lettering is the hardest test for AI. If outputs are weak, do the lettering by hand, scan, and overlay on AI-generated decorative marks.
+## Group B: Growl line creatures
 
-## Group B: Atmosphere and environments
+Until a separate Growl style is trained, override the palette in the prompt:
 
-### B1: Banner or background art
+> A [creature, e.g. hairy man with two long teeth and pale eyes], full body, oxblood and black instead of purple, heavier ink, more cross-hatching.
 
-> [Style anchor]. Atmospheric scene: [description, e.g. dark forest at night with two glowing eyes between trees]. Sketchy and loose, no creature shown clearly. Wide composition, atmosphere over detail.
+All Growl content rules from `oarfish-brand.md` apply: no gore, no shock, suggestion only.
 
-Parameters:
-- Midjourney: `--ar 16:9 --stylize 100`
-- Flux: Flux Pro, prompt strength 0.8
+## Group C: Phrase pieces
 
-### B2: Carousel slide art
+> Hand-lettered phrase "[phrase]" in marker, all caps (or all lowercase), uneven baseline, wonky kerning, on white paper. One small decorative mark beside the text (star, eye, asterisk, question mark).
 
-> [Style anchor]. Single creature centred, more empty paper space than usual, room for hand-lettered text overlay later. Purple ink on cream paper background.
+Recraft V3 is strong at text-in-image. If hand-lettering still drifts toward typeset, do it by hand on paper, scan, and overlay.
 
-Parameters:
-- Midjourney: `--ar 4:5 --stylize 50`
-- Flux: Flux Pro, prompt strength 0.85
+## Group D: Atmosphere and backgrounds
 
-## Group C: Social content
+> Atmospheric scene: [description, e.g. dark forest at night with two glowing eyes between trees]. Sketchy and loose, no creature shown clearly. Wide composition, atmosphere over detail.
 
-### C1: Meme template visual
+## Group E: Social content
 
-> [Style anchor]. [Meme idea, e.g. small cryptid with three eyes looking at a wallet, sad expression]. Rough sketch energy, joke is in the drawing. Single colour marker, loose, fast.
+### Meme template visual
 
-Parameters:
-- Midjourney: `--ar 1:1 --stylize 25`
-- Flux: Flux Schnell (faster, looser), prompt strength 0.7
+> [Meme idea, e.g. small cryptid with three eyes looking at a wallet, sad expression]. Sketchy, fast, rough.
 
-### C2: BTS sketchbook page
+### BTS sketchbook page
 
-> [Style anchor], styled as an open sketchbook page. Multiple small creature studies on one page, some half-drawn, marginalia, arrows, notes in marker. Coffee stain in corner. Looks like a real working sketchbook, not a finished piece.
-
-Parameters:
-- Midjourney: `--ar 4:5 --stylize 100 --weird 100`
-- Flux: Flux Pro, prompt strength 0.9
+> An open sketchbook page with multiple small creature studies, some half-drawn, marginalia, arrows, notes in marker. Coffee stain in corner. Looks like a real working sketchbook.
 
 ## Test rubric
 
-Score each output against the benchmark Oar Fish illustration on five dimensions, 1 to 5 each:
+Style consistency is mostly automatic now. Score on:
 
-1. Marker medium believability (does it look like marker on paper?)
-2. Linework looseness (wonky, not smooth)
-3. Palette match (Oar Fish purples and accents)
-4. Subject clarity (creature readable but not over-rendered)
-5. Vibe (would this fit on a hoodie next to the existing Oar Fish?)
+1. Subject clarity (creature readable but not over-rendered)
+2. Composition (works where it needs to go: hoodie back, IG square, carousel)
+3. Brand fit (would this sit next to existing Oar Fish on the shop page?)
 
-Below 18/25: reject. 18 to 21: keep iterating. 22 or above: save the exact prompt to `oarfish-winning-prompts.md` for reuse.
+Below 9/15: reject. 9 to 12: iterate. 13 or above: save the prompt exactly as written to `oarfish-winning-prompts.md`.
 
-## Iteration tips
+## When to retrain or extend the style
 
-1. Generate four to eight variants per prompt before judging. Variance is high.
-2. Lower stylize (Midjourney) or prompt strength (Flux) if outputs look too AI. Counterintuitive but usually correct for this aesthetic.
-3. Do not fix wonkiness. First instinct will be to ask for cleaner lines. Resist.
-4. Reject anything that looks like a cartoon mascot or Pixar character. AI defaults there given any opening.
-5. If a Group A prompt is producing strong creatures, lock the exact wording before changing anything else.
-6. Compare side-by-side with the benchmark in another tab. Memory drifts in 10 minutes.
+Three triggers:
 
-## What AI image gen is for, and what it isn't
+1. Style drifts on multiple consecutive prompts. Add more references and retrain.
+2. Growl line ships its first real designs. Train a separate `Oar Fish Growl` style.
+3. Vol. 03 lands with a notably new direction. Either retrain or branch.
 
-For:
-- Ideation and rapid creature exploration
+Never retrain on AI-generated output. That compounds drift. Only use real hand-drawn references.
+
+## What still needs human hands
+
+Per the brand bible's production rule, every print on a garment starts from a real marker drawing. Recraft is for:
+
+- Ideation and creature exploration
 - Social content visuals (memes, atmosphere, sketchbook pages)
-- Carousel slide art and banners
+- Carousel art and banners
 - Mood boards
-- Mockup compositions
+- Mockups
 
-Not for:
-- Final hoodie prints (every print starts from a real marker drawing)
-- Customer or model photography (use real people, real environments)
-- Variants of the existing Oar Fish mascot (the Oar Fish is the Oar Fish)
-- Anything where the imperfection of human hands is the whole point
+Not for: final hoodie or tee prints, customer photography, anything where the imperfection of human hands is the whole point.
 
-If a piece would go on a garment, generate the idea with AI, then redraw it by hand in marker. The hand-redraw is the doctrine, not optional.
+The garment workflow stays: ideate in Recraft if useful, then redraw by hand in real marker on real paper, scan, then print on garment.
 
-## First action
+## Cultural sensitivity
 
-1. Open the Oar Fish hoodie illustration as the visual benchmark
-2. Run A1 with a placeholder creature like "small horned cat with too many legs"
-3. Generate eight variants in Midjourney and eight in Flux
-4. Score each against the rubric
-5. Keep the highest scorer's exact prompt
-6. Iterate the next prompt from there
+Cryptid rules from `oarfish-brand.md` apply to AI-generated creatures the same way they apply to hand-drawn ones. No Aboriginal Dreaming or Torres Strait Islander sacred figures. No Wendigo or other living Indigenous mythology. When in doubt, invent.
 
-Two hours of focused testing usually gets two or three locked prompts. That is enough to start.
+## Future: Roost integration
+
+Recraft has an API. A future Oar Fish workspace tool could generate creatures on demand from chat ("draw a small horned beetle for the next Growl drop"). Not built yet. Worth noting for whenever the Roost Phase 6 pluggable agent_provider architecture lands.
