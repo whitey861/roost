@@ -29,9 +29,18 @@ export interface RunChatParams {
   sessionId?: string;
   channel: ChannelType;
   channelIdentifier?: string;
-  userMessage: string;
+  userMessage: string | AnthropicMessageContent[];
   maxToolIterations?: number;
   embedQueryFn?: QueryEmbedder;
+}
+
+// Pulls a plain-text representation out of a multimodal user message so
+// the session title, knowledge retrieval, and any other text-only consumers
+// have something to work with. Returns '' for an image-only turn.
+function userMessageText(m: string | AnthropicMessageContent[]): string {
+  if (typeof m === 'string') return m;
+  const text = m.find((b): b is Extract<AnthropicMessageContent, { type: 'text' }> => b.type === 'text');
+  return text?.text ?? '';
 }
 
 export interface ChatRunResult {
@@ -98,7 +107,7 @@ export async function loadHistory(client: SupabaseClient, sessionId: string): Pr
   return reconstructHistory(
     (data ?? []) as Array<{
       role: string;
-      content: string | null;
+      content: unknown;
       tool_call_id: string | null;
       tool_name: string | null;
       tool_input: Record<string, unknown> | null;
@@ -107,13 +116,27 @@ export async function loadHistory(client: SupabaseClient, sessionId: string): Pr
   );
 }
 
+// messages.content is jsonb. Plain text-only messages are still persisted
+// as bare JSON strings (so existing read paths see a string), but multimodal
+// user messages are persisted as a JSON array of content blocks. Normalise
+// on read so consumers handle both shapes consistently.
+function normaliseStoredContent(c: unknown): string | AnthropicMessageContent[] {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c as AnthropicMessageContent[];
+  return '';
+}
+
+function textOnlyContent(c: unknown): string {
+  return typeof c === 'string' ? c : '';
+}
+
 // Pure: turn ordered DB rows into Claude-shaped message history.
 // Server-side tool calls (handler_type='anthropic_server') and their results
 // belong inside the assistant message's content (Anthropic generated both),
 // so they go into pendingAssistant rather than pendingToolResults.
 export function reconstructHistory(rows: Array<{
   role: string;
-  content: string | null;
+  content: unknown;
   tool_call_id: string | null;
   tool_name: string | null;
   tool_input: Record<string, unknown> | null;
@@ -128,11 +151,11 @@ export function reconstructHistory(rows: Array<{
     if (m.role === 'user') {
       if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
       if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
-      messages.push({ role: 'user', content: m.content ?? '' });
+      messages.push({ role: 'user', content: normaliseStoredContent(m.content) });
     } else if (m.role === 'assistant') {
       if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
       pendingAssistant = pendingAssistant ?? [];
-      pendingAssistant.push({ type: 'text', text: m.content ?? '' });
+      pendingAssistant.push({ type: 'text', text: textOnlyContent(m.content) });
     } else if (m.role === 'tool_call') {
       pendingAssistant = pendingAssistant ?? [];
       if (isServerTool) {
@@ -231,8 +254,12 @@ async function persistToolResult(
   });
 }
 
-async function persistUserMessage(client: SupabaseClient, sessionId: string, text: string): Promise<void> {
-  await client.from('messages').insert({ session_id: sessionId, role: 'user', content: text });
+async function persistUserMessage(
+  client: SupabaseClient,
+  sessionId: string,
+  content: string | AnthropicMessageContent[],
+): Promise<void> {
+  await client.from('messages').insert({ session_id: sessionId, role: 'user', content });
 }
 
 async function touchSession(client: SupabaseClient, sessionId: string): Promise<void> {
@@ -243,6 +270,8 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   const { client, anthropic } = params;
   const { workspace, agent, tools } = await loadContext(client, params.workspaceId, params.agentId);
 
+  const userMessageTextForRetrieval = userMessageText(params.userMessage);
+  const titleSeed = userMessageTextForRetrieval.length > 0 ? userMessageTextForRetrieval : '(image)';
   const sessionId = await loadOrCreateSession(client, {
     workspaceId: workspace.id,
     userId: params.userId,
@@ -250,7 +279,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
     channel: params.channel,
     channelIdentifier: params.channelIdentifier,
     sessionId: params.sessionId,
-    firstMessage: params.userMessage,
+    firstMessage: titleSeed,
   });
   yield { type: 'session', session_id: sessionId };
 
@@ -264,11 +293,14 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
 
   // Knowledge auto-injection: retrieve top hits relevant to the user's
   // message and prepend them to the system prompt for this run.
-  // retrieveTopK no-ops gracefully when Voyage isn't configured or when
-  // no chunks meet the similarity threshold.
+  // retrieveTopK no-ops gracefully when Voyage isn't configured, when
+  // no chunks meet the similarity threshold, or when the user sent an
+  // image with no caption (text is empty).
   let knowledgeHits: KnowledgeHit[] = [];
   try {
-    knowledgeHits = await retrieveTopK(client, workspace.id, params.userMessage, 4, 0.4, { embedQueryFn: params.embedQueryFn });
+    if (userMessageTextForRetrieval.length > 0) {
+      knowledgeHits = await retrieveTopK(client, workspace.id, userMessageTextForRetrieval, 4, 0.4, { embedQueryFn: params.embedQueryFn });
+    }
   } catch {
     knowledgeHits = [];
   }

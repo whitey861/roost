@@ -8,8 +8,19 @@ import { serviceRoleClient } from '../_shared/supabase.ts';
 import { env, envOptional } from '../_shared/env.ts';
 import { jsonError, jsonOk } from '../_shared/errors.ts';
 import { defaultAnthropicClient } from '../_shared/anthropic.ts';
+import type { AnthropicMessageContent } from '../_shared/anthropic.ts';
 import { runChatCollecting } from '../_shared/chat-runtime.ts';
 import { answerCallbackQuery, editMessageText, sendMessage, sendPhoto, TELEGRAM_CAPTION_LIMIT, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
+import {
+  ANTHROPIC_IMAGE_BYTE_LIMIT,
+  buildMultimodalUserContent,
+  downloadTelegramFile,
+  extractImageFromTelegramMessage,
+  uploadToSupabaseStorage,
+  type ExtractedImage,
+  type TelegramDocument,
+  type TelegramPhotoSize,
+} from '../_shared/image-uploads.ts';
 
 // Telegram update types we care about in this phase.
 interface TelegramUser {
@@ -30,6 +41,9 @@ interface TelegramMessage {
   chat: TelegramChat;
   date: number;
   text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
 }
 
 interface TelegramCallbackQuery {
@@ -356,7 +370,41 @@ async function workspaceName(service: ReturnType<typeof serviceRoleClient>, wsId
 // Streaming pattern: send a placeholder, then edit at most every EDIT_INTERVAL_MS.
 const EDIT_INTERVAL_MS = 1500;
 
-async function handleTextMessage(chatId: number, telegramUser: TelegramUser, text: string): Promise<Response> {
+// Resolves a Telegram image (photo or image-document) to a public Supabase
+// Storage URL the model can later fetch. Returns null when nothing is
+// uploaded; throws a TooLargeError if the file exceeds Anthropic's 5MB cap.
+class ImageTooLargeError extends Error {}
+
+async function uploadTelegramImage(image: ExtractedImage, conversationId: string): Promise<string> {
+  if (image.file_size !== null && image.file_size > ANTHROPIC_IMAGE_BYTE_LIMIT) {
+    throw new ImageTooLargeError(
+      `Image is ${(image.file_size / (1024 * 1024)).toFixed(1)}MB; Anthropic accepts up to ${(ANTHROPIC_IMAGE_BYTE_LIMIT / (1024 * 1024)).toFixed(0)}MB.`,
+    );
+  }
+  const botToken = env('TELEGRAM_BOT_TOKEN');
+  const file = await downloadTelegramFile(image.file_id, botToken);
+  if (file.bytes.byteLength > ANTHROPIC_IMAGE_BYTE_LIMIT) {
+    throw new ImageTooLargeError(
+      `Image is ${(file.bytes.byteLength / (1024 * 1024)).toFixed(1)}MB; Anthropic accepts up to ${(ANTHROPIC_IMAGE_BYTE_LIMIT / (1024 * 1024)).toFixed(0)}MB.`,
+    );
+  }
+  const supabaseUrl = env('SUPABASE_URL');
+  const serviceRoleKey = env('SUPABASE_SERVICE_ROLE_KEY');
+  return await uploadToSupabaseStorage(
+    file.bytes,
+    file.mime_type,
+    file.ext,
+    supabaseUrl,
+    serviceRoleKey,
+    conversationId,
+  );
+}
+
+async function handleUserMessage(
+  chatId: number,
+  telegramUser: TelegramUser,
+  payload: { text: string; image: ExtractedImage | null },
+): Promise<Response> {
   const service = serviceRoleClient();
   const link = await getLinkByTelegramUser(service, telegramUser.id);
   if (!link) {
@@ -367,6 +415,27 @@ async function handleTextMessage(chatId: number, telegramUser: TelegramUser, tex
     await sendMessage(chatId, 'No active workspace. Use /use <slug> to pick one.');
     return jsonOk({ ok: true });
   }
+
+  // Upload first so an obvious failure (e.g. too large) can be surfaced
+  // before the placeholder reply is created.
+  let imageUrl: string | null = null;
+  if (payload.image) {
+    try {
+      imageUrl = await uploadTelegramImage(payload.image, String(chatId));
+    } catch (err) {
+      if (err instanceof ImageTooLargeError) {
+        await sendMessage(chatId, err.message);
+        return jsonOk({ ok: true });
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      await sendMessage(chatId, `Couldn't process the image: ${msg}`);
+      return jsonOk({ ok: true });
+    }
+  }
+
+  const userContent: string | AnthropicMessageContent[] = imageUrl
+    ? (buildMultimodalUserContent({ imageUrl, caption: payload.text }) as AnthropicMessageContent[])
+    : payload.text;
 
   const placeholder = await sendMessage(chatId, '...');
   const messageId = placeholder.message_id;
@@ -401,7 +470,7 @@ async function handleTextMessage(chatId: number, telegramUser: TelegramUser, tex
         sessionId: link.current_session_id ?? undefined,
         channel: 'telegram',
         channelIdentifier: String(chatId),
-        userMessage: text,
+        userMessage: userContent,
       },
       async (ev) => {
         if (ev.type === 'session') {
@@ -580,11 +649,13 @@ async function handle(req: Request): Promise<Response> {
     if (text.startsWith('/')) {
       return await handleSlashCommand(msg.chat.id, msg.from, text);
     }
-    if (text.length === 0) {
-      // Phase 5 will handle voice / photos. For now, ignore quietly.
+    const image = extractImageFromTelegramMessage(msg);
+    const caption = (msg.caption ?? msg.text ?? '').trim();
+    if (!image && caption.length === 0) {
+      // Non-image, non-text update (sticker, voice, etc.). Ignore quietly.
       return jsonOk({ ok: true });
     }
-    return await handleTextMessage(msg.chat.id, msg.from, text);
+    return await handleUserMessage(msg.chat.id, msg.from, { text: caption, image });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('telegram-webhook error:', msg);
