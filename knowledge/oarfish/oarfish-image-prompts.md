@@ -106,6 +106,11 @@ The garment workflow stays: ideate in Recraft if useful, then redraw by hand in 
 
 Cryptid rules from `oarfish-brand.md` apply to AI-generated creatures the same way they apply to hand-drawn ones. No Aboriginal Dreaming or Torres Strait Islander sacred figures. No Wendigo or other living Indigenous mythology. When in doubt, invent.
 
-## Future: Roost integration
+## Roost integration
 
-Recraft has an API. A future Oar Fish workspace tool could generate creatures on demand from chat ("draw a small horned beetle for the next Growl drop"). Not built yet. Worth noting for whenever the Roost Phase 6 pluggable agent_provider architecture lands.
+Recraft has an API. A future Oar Fish workspace tool could generate creatures on demand from chat ("draw a small horned beetle for the next Growl drop"). 
+
+Recraft `style_id`: `dad87807-a760-46e6-85f2-18bbb5461750`
+
+Always pass this `style_id` to `generate_image` when working on Oar Fish output. Without it, generation falls back to the generic hand-drawn base style and won't match the trained doctrine.
+
