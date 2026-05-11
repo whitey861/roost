@@ -38,9 +38,9 @@ function seedWorkspacesAndTools(db: FakeDb): { workspaceIds: Record<string, stri
 }
 
 describe('seed: workspaces and agents', () => {
-  it('seeds the five expected workspaces', () => {
+  it('seeds the expected workspaces', () => {
     const slugs = WORKSPACES.map((w) => w.slug).sort();
-    expect(slugs).toEqual(['budget', 'dev', 'kca', 'personal', 'pmhc']);
+    expect(slugs).toEqual(['budget', 'dev', 'kca', 'oarfish', 'personal', 'pmhc']);
   });
 
   it('every workspace has exactly one default agent', () => {
@@ -84,6 +84,28 @@ describe('seed: tools', () => {
     expect(t.handlerType).toBe('anthropic_server');
     expect(t.handlerConfig.server_tool_type).toBe('web_search_20250305');
   });
+
+  it('includes generate_image as an internal tool scoped to oarfish', () => {
+    const t = TOOLS.find((x) => x.name === 'generate_image')!;
+    expect(t.handlerType).toBe('internal');
+    expect(t.requiresApprovalDefault).toBe(false);
+    expect(t.isOutbound).toBe(false);
+    expect(t.workspaceScope).toEqual(['oarfish']);
+  });
+});
+
+describe('migrations: generate_image registry row', () => {
+  it('0014_generate_image_tool.sql inserts the tool row idempotently', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { readFileSync } = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { join } = require('node:path') as typeof import('node:path');
+    const sql = readFileSync(join(__dirname, '..', 'supabase', 'migrations', '0014_generate_image_tool.sql'), 'utf8');
+    expect(sql).toMatch(/insert into public\.tools/i);
+    expect(sql).toMatch(/'generate_image'/);
+    expect(sql).toMatch(/'internal'/);
+    expect(sql).toMatch(/on conflict\s*\(name\)\s*do nothing/i);
+  });
 });
 
 describe('ensureAgents: behaviour', () => {
@@ -92,7 +114,7 @@ describe('ensureAgents: behaviour', () => {
     const { workspaceIds, toolIds } = seedWorkspacesAndTools(db);
     await ensureAgents(client, workspaceIds, toolIds);
     const agents = db.tableRows('agents');
-    expect(agents).toHaveLength(5);
+    expect(agents).toHaveLength(WORKSPACES.length);
     for (const a of agents) {
       expect(typeof a.system_prompt).toBe('string');
       expect((a.system_prompt as string).length).toBeGreaterThan(0);

@@ -10,6 +10,7 @@ import type { ChatStreamEvent, ChannelType, WorkspaceApprovalMode } from './type
 import { addSpend, getBudgetState, isOverBudget, rolloverIfNeeded } from './budget.js';
 import { approvalRequired, loadAgentTools, toAnthropicToolDefs, type ToolRow } from './tools-runtime.js';
 import { runMockTool, SERVER_TOOL_NAMES } from './tools.js';
+import { generateImage, type GenerateImageInput } from './tool-handlers/generate-image.js';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.js';
 import { costUsd } from './pricing.js';
 import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit, type QueryEmbedder } from './retrieval.js';
@@ -446,6 +447,9 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
           const max = Math.min(10, Math.max(1, Number(tu.input.max_results ?? 5)));
           const hits = await retrieveTopK(client, workspace.id, q, max, 0.3, { embedQueryFn: params.embedQueryFn });
           out = { hits };
+        } else if (toolRow.handler_type === 'internal' && tu.name === 'generate_image') {
+          const result = await generateImage(tu.input as unknown as GenerateImageInput);
+          out = result as unknown as Record<string, unknown>;
         } else if (toolRow.handler_type === 'internal' && tu.name === 'check_dev_jobs') {
           const limit = Math.min(20, Math.max(1, Number(tu.input.limit ?? 5)));
           const statusFilter = typeof tu.input.status === 'string' ? tu.input.status : null;

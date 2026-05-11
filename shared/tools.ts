@@ -152,6 +152,32 @@ export const TOOLS: ToolDefinition[] = [
     workspaceScope: ['dev'],
   },
   {
+    name: 'generate_image',
+    description:
+      'Generate an image using Recraft based on a text prompt. Optionally takes a Recraft style_id to apply a trained brand style. Returns a public image URL the assistant should embed in the reply using markdown image syntax: ![alt](url).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'The image prompt.' },
+        style_id: {
+          type: 'string',
+          description: 'Optional Recraft trained brand-style UUID.',
+        },
+        size: {
+          type: 'string',
+          description: 'Image size. Defaults to 1024x1024.',
+          enum: ['1024x1024', '1365x1024', '1024x1365', '1536x1024', '1024x1536'],
+        },
+      },
+      required: ['prompt'],
+    },
+    handlerType: 'internal',
+    handlerConfig: {},
+    requiresApprovalDefault: false,
+    isOutbound: false,
+    workspaceScope: ['oarfish'],
+  },
+  {
     name: 'web_search',
     description:
       'Search the web for current information, news, facts, or anything not in your knowledge base. Use when the user asks about current events, recent developments, or specific facts you need to verify. Executed server-side by Anthropic; results are returned inline with citations.',

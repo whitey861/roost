@@ -9,7 +9,7 @@ import { env, envOptional } from '../_shared/env.ts';
 import { jsonError, jsonOk } from '../_shared/errors.ts';
 import { defaultAnthropicClient } from '../_shared/anthropic.ts';
 import { runChatCollecting } from '../_shared/chat-runtime.ts';
-import { answerCallbackQuery, editMessageText, sendMessage, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
+import { answerCallbackQuery, editMessageText, sendMessage, sendPhoto, TELEGRAM_CAPTION_LIMIT, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
 
 // Telegram update types we care about in this phase.
 interface TelegramUser {
@@ -54,6 +54,31 @@ const HELP_TEXT = [
   '/spawn <owner/repo> [<minutes>] [<cost>] - dev workspace only: queue all user messages in this thread as a dev job, bypassing the agent',
   '/help - show this help',
 ].join('\n');
+
+// Inline mirror of shared/telegram-helpers.ts#extractFirstImageMarkdown.
+// Kept in sync with that module (which is unit-tested) because Deno and
+// Node imports don't share a single source of truth for these helpers.
+const IMAGE_MARKDOWN_RE_INLINE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+\.(?:png|jpg|jpeg|gif|webp))\)/i;
+
+interface ExtractedImageInline {
+  imageUrl: string;
+  alt: string;
+  caption: string;
+  captionOverflow: boolean;
+}
+
+function extractFirstImageMarkdownInline(text: string): ExtractedImageInline | null {
+  const match = text.match(IMAGE_MARKDOWN_RE_INLINE);
+  if (!match) return null;
+  const [fullMatch, alt, imageUrl] = match;
+  const stripped = text.replace(fullMatch!, '').trim();
+  return {
+    imageUrl: imageUrl!,
+    alt: alt ?? '',
+    caption: stripped,
+    captionOverflow: stripped.length > TELEGRAM_CAPTION_LIMIT,
+  };
+}
 
 // Inline mirror of shared/telegram-helpers.ts#parseSpawnArgs. Kept in sync
 // with that module (which is unit-tested) because Deno and Node imports
@@ -401,9 +426,29 @@ async function handleTextMessage(chatId: number, telegramUser: TelegramUser, tex
       },
     );
 
-    await flushIfDue(true);
-    if (buffer.length === 0) {
-      await editMessageText(chatId, messageId, '(no reply)');
+    const image = extractFirstImageMarkdownInline(buffer);
+    if (image) {
+      // Replace the streaming placeholder with the photo. The placeholder
+      // edit just acknowledges the run is finished; the photo carries the
+      // assistant text in its caption.
+      const captionForPhoto = image.captionOverflow ? image.alt : (image.caption.length > 0 ? image.caption : image.alt);
+      try {
+        await editMessageText(chatId, messageId, '(image attached)');
+      } catch (_err) {
+        // Best effort — sendPhoto below is the user-visible result.
+      }
+      await sendPhoto(chatId, image.imageUrl, {
+        caption: captionForPhoto.length > 0 ? captionForPhoto : undefined,
+        parse_mode: 'Markdown',
+      });
+      if (image.captionOverflow) {
+        await sendMessage(chatId, image.caption);
+      }
+    } else {
+      await flushIfDue(true);
+      if (buffer.length === 0) {
+        await editMessageText(chatId, messageId, '(no reply)');
+      }
     }
     void result;
   } catch (err) {

@@ -81,6 +81,40 @@ export function parseSpawnArgs(arg: string | null): SpawnArgs | SpawnArgsError {
   return { repo, maxRuntimeMinutes, maxCostUsd };
 }
 
+// Telegram caption hard limit (chars). Captions over this length must be
+// sent as a separate text message after the photo.
+export const TELEGRAM_CAPTION_LIMIT = 1024;
+
+// Matches the first markdown image with a recognised image-file extension.
+// Conservative on purpose: only HTTPS URLs ending in a known image
+// extension, so we don't try to send an arbitrary link as a photo.
+const IMAGE_MARKDOWN_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+\.(?:png|jpg|jpeg|gif|webp))\)/i;
+
+export interface ExtractedImage {
+  imageUrl: string;
+  alt: string;
+  // Caption is the assistant text with the image markdown removed,
+  // already trimmed. Use `alt` as a fallback when this is empty.
+  caption: string;
+  // True when the caption is too long for Telegram and must be sent
+  // as a follow-up text message after sendPhoto.
+  captionOverflow: boolean;
+}
+
+export function extractFirstImageMarkdown(text: string): ExtractedImage | null {
+  const match = text.match(IMAGE_MARKDOWN_RE);
+  if (!match) return null;
+  const [fullMatch, alt, imageUrl] = match;
+  const stripped = text.replace(fullMatch!, '').trim();
+  const captionOverflow = stripped.length > TELEGRAM_CAPTION_LIMIT;
+  return {
+    imageUrl: imageUrl!,
+    alt: alt ?? '',
+    caption: stripped,
+    captionOverflow,
+  };
+}
+
 // Pure 6-digit code generator. Uses crypto.getRandomValues which is
 // available in Node 19+ and Deno.
 export function generatePairingCode(): string {

@@ -74,6 +74,20 @@ export function answerCallbackQuery(callbackQueryId: string, text?: string): Pro
   });
 }
 
+// Telegram caption hard limit is 1024 characters.
+export const TELEGRAM_CAPTION_LIMIT = 1024;
+
+export function sendPhoto(
+  chatId: number,
+  photoUrl: string,
+  options: { caption?: string; parse_mode?: 'Markdown' | 'HTML' } = {},
+): Promise<SentMessage> {
+  const params: Record<string, unknown> = { chat_id: chatId, photo: photoUrl };
+  if (options.caption !== undefined) params.caption = options.caption;
+  if (options.parse_mode !== undefined) params.parse_mode = options.parse_mode;
+  return call<SentMessage>('sendPhoto', params);
+}
+
 export function setWebhook(url: string, secretToken: string): Promise<true> {
   return call<true>('setWebhook', {
     url,
