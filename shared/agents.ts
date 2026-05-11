@@ -65,6 +65,7 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 function toolNamesForWorkspace(slug: string): string[] {
   const base = ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'];
   if (slug === 'dev') return [...base, 'spawn_dev_agent', 'check_dev_jobs'];
+  if (slug === 'oarfish') return [...base, 'generate_image'];
   return base;
 }
 

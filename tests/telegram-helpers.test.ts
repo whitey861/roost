@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  extractFirstImageMarkdown,
   generatePairingCode,
   parseApprovalCallback,
   parseSlashCommand,
   parseSpawnArgs,
+  TELEGRAM_CAPTION_LIMIT,
 } from '../shared/telegram-helpers.js';
 
 describe('parseSlashCommand', () => {
@@ -98,6 +100,45 @@ describe('parseSpawnArgs', () => {
   it('rejects extra args', () => {
     const r = parseSpawnArgs('a/b 60 5 extra');
     expect('error' in r && r.error.includes('Too many')).toBe(true);
+  });
+});
+
+describe('extractFirstImageMarkdown', () => {
+  it('returns null when the text has no image markdown', () => {
+    expect(extractFirstImageMarkdown('just text')).toBeNull();
+    expect(extractFirstImageMarkdown('a [link](https://example.com) only')).toBeNull();
+  });
+
+  it('extracts the URL, alt, and trimmed caption', () => {
+    const r = extractFirstImageMarkdown('Here is the piece. ![oar fish](https://img.recraft.ai/x.png)');
+    expect(r).toBeTruthy();
+    expect(r!.imageUrl).toBe('https://img.recraft.ai/x.png');
+    expect(r!.alt).toBe('oar fish');
+    expect(r!.caption).toBe('Here is the piece.');
+    expect(r!.captionOverflow).toBe(false);
+  });
+
+  it('only matches recognised image extensions', () => {
+    expect(extractFirstImageMarkdown('![x](https://example.com/page)')).toBeNull();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.svg)')).toBeNull();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.png)')).toBeTruthy();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.jpg)')).toBeTruthy();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.jpeg)')).toBeTruthy();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.gif)')).toBeTruthy();
+    expect(extractFirstImageMarkdown('![x](https://example.com/x.webp)')).toBeTruthy();
+  });
+
+  it('flags captions that exceed the Telegram caption limit', () => {
+    const long = 'x'.repeat(TELEGRAM_CAPTION_LIMIT + 50);
+    const r = extractFirstImageMarkdown(`${long} ![a](https://e.com/i.png)`);
+    expect(r?.captionOverflow).toBe(true);
+  });
+
+  it('picks the first image when multiple are present', () => {
+    const r = extractFirstImageMarkdown(
+      '![a](https://e.com/a.png) and ![b](https://e.com/b.png)',
+    );
+    expect(r?.imageUrl).toBe('https://e.com/a.png');
   });
 });
 
