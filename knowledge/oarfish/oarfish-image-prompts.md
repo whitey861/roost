@@ -15,6 +15,10 @@ References used for training:
 - Anglerfish Cap art
 - Horned Beast Tee art
 
+Recraft `style_id`: `dad87807-a760-46e6-85f2-18bbb5461750`
+
+Always pass this `style_id` to `generate_image` when working on Oar Fish output. Without it, generation falls back to the generic hand-drawn base style and won't match the trained doctrine.
+
 The style handles, automatically, on every generation:
 
 - Marker and ink texture
