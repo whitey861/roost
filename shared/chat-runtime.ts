@@ -104,6 +104,30 @@ export async function loadHistory(client: SupabaseClient, sessionId: string): Pr
   );
 }
 
+// Normalise the persisted tool_output for a web_search server tool back into
+// the array shape Anthropic's API expects for web_search_tool_result.content.
+// Persistence stores { content: <array> }, but older rows or future write-path
+// drift may leave content as a stringified JSON array, a single object, or
+// missing entirely. Anthropic rejects anything other than an array of
+// RequestWebSearchResultBlock with a 400.
+export function normaliseWebSearchResultContent(stored: unknown): unknown[] {
+  let content: unknown = stored;
+  if (content && typeof content === 'object' && !Array.isArray(content)
+      && 'content' in (content as Record<string, unknown>)) {
+    content = (content as Record<string, unknown>).content;
+  }
+  if (typeof content === 'string') {
+    try {
+      content = JSON.parse(content);
+    } catch {
+      return [];
+    }
+  }
+  if (content == null) return [];
+  if (Array.isArray(content)) return content;
+  return [content];
+}
+
 // Pure: turn ordered DB rows into Claude-shaped message history.
 // Server-side tool calls (handler_type='anthropic_server') and their results
 // belong inside the assistant message's content (Anthropic generated both),
@@ -153,7 +177,7 @@ export function reconstructHistory(rows: Array<{
         pendingAssistant.push({
           type: 'web_search_tool_result',
           tool_use_id: m.tool_call_id ?? '',
-          content: (m.tool_output ?? {}) as unknown,
+          content: normaliseWebSearchResultContent(m.tool_output),
         });
       } else {
         if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
