@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { runChat, reconstructHistory } from '../shared/chat-runtime.js';
+import { runChat, reconstructHistory, normaliseWebSearchResultContent } from '../shared/chat-runtime.js';
 import { TOOLS, SERVER_TOOL_NAMES } from '../shared/tools.js';
 import { toAnthropicToolDefs, type ToolRow } from '../shared/tools-runtime.js';
 import { AGENTS } from '../shared/agents.js';
@@ -215,6 +215,72 @@ describe('reconstructHistory: server-tool blocks live in the assistant message',
     expect(blocks.map((b) => b.type)).toEqual(['text', 'server_tool_use', 'web_search_tool_result', 'text']);
   });
 
+  it('produces an array content field for web_search_tool_result (persisted shape)', () => {
+    // Persist shape: tool_output is { content: <array of result blocks> }.
+    // Reconstruction must unwrap that to a plain array so Anthropic's
+    // RequestWebSearchResultBlock[] validation passes.
+    const searchContent = [
+      { type: 'web_search_result', url: 'https://example.com/a', title: 'A', encrypted_content: 'enc1' },
+      { type: 'web_search_result', url: 'https://example.com/b', title: 'B', encrypted_content: 'enc2' },
+    ];
+    const rows = [
+      { role: 'user', content: 'news?', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
+      { role: 'tool_call', content: null, tool_call_id: 'srv_1', tool_name: 'web_search', tool_input: { query: 'x' }, tool_output: null },
+      { role: 'tool_result', content: null, tool_call_id: 'srv_1', tool_name: 'web_search', tool_input: null, tool_output: { content: searchContent } },
+      { role: 'assistant', content: 'summary', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
+      { role: 'user', content: 'tell me more', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
+    ];
+    const messages = reconstructHistory(rows);
+    const assistantTurn = messages.find((m) => m.role === 'assistant' && Array.isArray(m.content));
+    const blocks = assistantTurn!.content as Array<{ type: string; content?: unknown }>;
+    const webSearchBlock = blocks.find((b) => b.type === 'web_search_tool_result')!;
+    expect(webSearchBlock).toBeDefined();
+    expect(Array.isArray(webSearchBlock.content)).toBe(true);
+    expect(webSearchBlock.content).toEqual(searchContent);
+  });
+
+  it('produces an array content field when persisted as a stringified JSON array', () => {
+    // Defensive: older or future write-path drift may leave content as a
+    // stringified JSON. Reconstruction must still emit an array.
+    const searchContent = [{ type: 'web_search_result', url: 'https://e.com', title: 'E', encrypted_content: 'x' }];
+    const rows = [
+      { role: 'user', content: 'q', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
+      { role: 'tool_call', content: null, tool_call_id: 'srv_2', tool_name: 'web_search', tool_input: { query: 'q' }, tool_output: null },
+      { role: 'tool_result', content: null, tool_call_id: 'srv_2', tool_name: 'web_search', tool_input: null, tool_output: { content: JSON.stringify(searchContent) } as Record<string, unknown> },
+    ];
+    const messages = reconstructHistory(rows);
+    const blocks = messages[messages.length - 1]!.content as Array<{ type: string; content?: unknown }>;
+    const webSearchBlock = blocks.find((b) => b.type === 'web_search_tool_result')!;
+    expect(Array.isArray(webSearchBlock.content)).toBe(true);
+    expect(webSearchBlock.content).toEqual(searchContent);
+  });
+
+  it('produces an array content field when persisted as a single result object', () => {
+    const single = { type: 'web_search_result', url: 'https://one.com', title: 'One', encrypted_content: 'x' };
+    const rows = [
+      { role: 'user', content: 'q', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
+      { role: 'tool_call', content: null, tool_call_id: 'srv_3', tool_name: 'web_search', tool_input: { query: 'q' }, tool_output: null },
+      { role: 'tool_result', content: null, tool_call_id: 'srv_3', tool_name: 'web_search', tool_input: null, tool_output: { content: single } as Record<string, unknown> },
+    ];
+    const messages = reconstructHistory(rows);
+    const blocks = messages[messages.length - 1]!.content as Array<{ type: string; content?: unknown }>;
+    const webSearchBlock = blocks.find((b) => b.type === 'web_search_tool_result')!;
+    expect(Array.isArray(webSearchBlock.content)).toBe(true);
+    expect(webSearchBlock.content).toEqual([single]);
+  });
+
+  it('produces an empty array when tool_output is null', () => {
+    const rows = [
+      { role: 'tool_call', content: null, tool_call_id: 'srv_4', tool_name: 'web_search', tool_input: { query: 'q' }, tool_output: null },
+      { role: 'tool_result', content: null, tool_call_id: 'srv_4', tool_name: 'web_search', tool_input: null, tool_output: null },
+    ];
+    const messages = reconstructHistory(rows);
+    const blocks = messages[0]!.content as Array<{ type: string; content?: unknown }>;
+    const webSearchBlock = blocks.find((b) => b.type === 'web_search_tool_result')!;
+    expect(Array.isArray(webSearchBlock.content)).toBe(true);
+    expect(webSearchBlock.content).toEqual([]);
+  });
+
   it('still routes client tool_result rows into a separate user message', () => {
     const rows = [
       { role: 'user', content: 'echo', tool_call_id: null, tool_name: null, tool_input: null, tool_output: null },
@@ -228,5 +294,35 @@ describe('reconstructHistory: server-tool blocks live in the assistant message',
     expect(aBlocks.map((b) => b.type)).toEqual(['tool_use']);
     const tBlocks = messages[2]!.content as Array<{ type: string }>;
     expect(tBlocks.map((b) => b.type)).toEqual(['tool_result']);
+  });
+});
+
+describe('normaliseWebSearchResultContent', () => {
+  const arr = [{ type: 'web_search_result', url: 'https://e.com', title: 'E', encrypted_content: 'x' }];
+
+  it('unwraps the { content: [...] } persistence shape', () => {
+    expect(normaliseWebSearchResultContent({ content: arr })).toEqual(arr);
+  });
+
+  it('passes through a raw array', () => {
+    expect(normaliseWebSearchResultContent(arr)).toEqual(arr);
+  });
+
+  it('parses a stringified JSON array inside { content }', () => {
+    expect(normaliseWebSearchResultContent({ content: JSON.stringify(arr) })).toEqual(arr);
+  });
+
+  it('wraps a single object in an array', () => {
+    expect(normaliseWebSearchResultContent({ content: arr[0] })).toEqual([arr[0]]);
+  });
+
+  it('returns [] for null/undefined', () => {
+    expect(normaliseWebSearchResultContent(null)).toEqual([]);
+    expect(normaliseWebSearchResultContent(undefined)).toEqual([]);
+    expect(normaliseWebSearchResultContent({ content: null })).toEqual([]);
+  });
+
+  it('returns [] for unparseable strings', () => {
+    expect(normaliseWebSearchResultContent({ content: 'not json' })).toEqual([]);
   });
 });
