@@ -29,7 +29,7 @@ export interface RunChatParams {
   sessionId?: string;
   channel: ChannelType;
   channelIdentifier?: string;
-  userMessage: string;
+  userMessage: string | AnthropicMessageContent[];
   maxToolIterations?: number;
   embedQueryFn?: QueryEmbedder;
 }
@@ -98,13 +98,41 @@ export async function loadHistory(client: SupabaseClient, sessionId: string): Pr
   return reconstructHistory(
     (data ?? []) as Array<{
       role: string;
-      content: string | null;
+      content: unknown;
       tool_call_id: string | null;
       tool_name: string | null;
       tool_input: Record<string, unknown> | null;
       tool_output: Record<string, unknown> | null;
     }>,
   );
+}
+
+// Normalise messages.content reads. The column is jsonb so values come back
+// as either a string (plain text user/assistant message) or an array of
+// content blocks (multimodal user message with image + text). Older rows
+// pre-jsonb migration may also surface as raw strings. Mirrors the pattern
+// used in normaliseWebSearchResultContent: be permissive on reads.
+export function normaliseUserMessageContent(stored: unknown): string | AnthropicMessageContent[] {
+  if (stored == null) return '';
+  if (typeof stored === 'string') return stored;
+  if (Array.isArray(stored)) return stored as AnthropicMessageContent[];
+  if (typeof stored === 'object') {
+    const maybeText = (stored as Record<string, unknown>).text;
+    if (typeof maybeText === 'string') return maybeText;
+  }
+  return '';
+}
+
+// Extract the plain-text portion of a user message for purposes that need a
+// string (session title, knowledge retrieval query, logging). For an array
+// of content blocks, joins all `text` blocks; non-text blocks are ignored.
+export function userMessageText(content: string | AnthropicMessageContent[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((b): b is Extract<AnthropicMessageContent, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join(' ')
+    .trim();
 }
 
 // Normalise the persisted tool_output for a web_search server tool back into
@@ -137,7 +165,7 @@ export function normaliseWebSearchResultContent(stored: unknown): unknown[] {
 // so they go into pendingAssistant rather than pendingToolResults.
 export function reconstructHistory(rows: Array<{
   role: string;
-  content: string | null;
+  content: unknown;
   tool_call_id: string | null;
   tool_name: string | null;
   tool_input: Record<string, unknown> | null;
@@ -152,11 +180,12 @@ export function reconstructHistory(rows: Array<{
     if (m.role === 'user') {
       if (pendingAssistant) { messages.push({ role: 'assistant', content: pendingAssistant }); pendingAssistant = null; }
       if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
-      messages.push({ role: 'user', content: m.content ?? '' });
+      messages.push({ role: 'user', content: normaliseUserMessageContent(m.content) });
     } else if (m.role === 'assistant') {
       if (pendingToolResults) { messages.push({ role: 'user', content: pendingToolResults }); pendingToolResults = null; }
       pendingAssistant = pendingAssistant ?? [];
-      pendingAssistant.push({ type: 'text', text: m.content ?? '' });
+      const text = userMessageText(normaliseUserMessageContent(m.content));
+      pendingAssistant.push({ type: 'text', text });
     } else if (m.role === 'tool_call') {
       pendingAssistant = pendingAssistant ?? [];
       if (isServerTool) {
@@ -255,8 +284,12 @@ async function persistToolResult(
   });
 }
 
-async function persistUserMessage(client: SupabaseClient, sessionId: string, text: string): Promise<void> {
-  await client.from('messages').insert({ session_id: sessionId, role: 'user', content: text });
+async function persistUserMessage(
+  client: SupabaseClient,
+  sessionId: string,
+  content: string | AnthropicMessageContent[],
+): Promise<void> {
+  await client.from('messages').insert({ session_id: sessionId, role: 'user', content });
 }
 
 async function touchSession(client: SupabaseClient, sessionId: string): Promise<void> {
@@ -267,6 +300,9 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   const { client, anthropic } = params;
   const { workspace, agent, tools } = await loadContext(client, params.workspaceId, params.agentId);
 
+  const userMessageContent = params.userMessage;
+  const userMessagePlainText = userMessageText(userMessageContent);
+
   const sessionId = await loadOrCreateSession(client, {
     workspaceId: workspace.id,
     userId: params.userId,
@@ -274,7 +310,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
     channel: params.channel,
     channelIdentifier: params.channelIdentifier,
     sessionId: params.sessionId,
-    firstMessage: params.userMessage,
+    firstMessage: userMessagePlainText,
   });
   yield { type: 'session', session_id: sessionId };
 
@@ -284,7 +320,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
     return;
   }
 
-  await persistUserMessage(client, sessionId, params.userMessage);
+  await persistUserMessage(client, sessionId, userMessageContent);
 
   // Knowledge auto-injection: retrieve top hits relevant to the user's
   // message and prepend them to the system prompt for this run.
@@ -292,7 +328,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   // no chunks meet the similarity threshold.
   let knowledgeHits: KnowledgeHit[] = [];
   try {
-    knowledgeHits = await retrieveTopK(client, workspace.id, params.userMessage, 4, 0.4, { embedQueryFn: params.embedQueryFn });
+    knowledgeHits = await retrieveTopK(client, workspace.id, userMessagePlainText, 4, 0.4, { embedQueryFn: params.embedQueryFn });
   } catch {
     knowledgeHits = [];
   }
@@ -304,7 +340,7 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
   const history = await loadHistory(client, sessionId);
   const messages: AnthropicMessage[] = [...history];
   if (messages.length === 0 || messages[messages.length - 1]?.role !== 'user') {
-    messages.push({ role: 'user', content: params.userMessage });
+    messages.push({ role: 'user', content: userMessageContent });
   }
 
   const toolDefs = toAnthropicToolDefs(tools);

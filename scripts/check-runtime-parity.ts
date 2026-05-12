@@ -13,6 +13,7 @@ import { resolve } from 'node:path';
 export const PAIRS: Array<[string, string]> = [
   ['shared/chat-runtime.ts', 'supabase/functions/_shared/chat-runtime.ts'],
   ['shared/retrieval.ts', 'supabase/functions/_shared/retrieval.ts'],
+  ['shared/image-uploads.ts', 'supabase/functions/_shared/image-uploads.ts'],
 ];
 
 // Backwards compat: tests and historical callers still import FILES.

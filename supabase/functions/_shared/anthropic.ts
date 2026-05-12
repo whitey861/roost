@@ -8,8 +8,13 @@ import Anthropic from 'npm:@anthropic-ai/sdk@0.40.1';
 import { env } from './env.ts';
 import type { AnthropicToolDef } from './types.ts';
 
+export type AnthropicImageSource =
+  | { type: 'url'; url: string }
+  | { type: 'base64'; media_type: string; data: string };
+
 export type AnthropicMessageContent =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: AnthropicImageSource }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
   | { type: 'server_tool_use'; id: string; name: string; input: Record<string, unknown> }

@@ -5,8 +5,13 @@
 
 import type { AnthropicToolDef } from './types.js';
 
+export type AnthropicImageSource =
+  | { type: 'url'; url: string }
+  | { type: 'base64'; media_type: string; data: string };
+
 export type AnthropicMessageContent =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: AnthropicImageSource }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
   | { type: 'server_tool_use'; id: string; name: string; input: Record<string, unknown> }

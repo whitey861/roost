@@ -10,6 +10,14 @@ import { jsonError, jsonOk } from '../_shared/errors.ts';
 import { defaultAnthropicClient } from '../_shared/anthropic.ts';
 import { runChatCollecting } from '../_shared/chat-runtime.ts';
 import { answerCallbackQuery, editMessageText, sendMessage, sendPhoto, TELEGRAM_CAPTION_LIMIT, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
+import {
+  buildUserMessageContent,
+  extractImageRefFromTelegramMessage,
+  ingestTelegramImage,
+  type ExtractedImageRef,
+  type ImageUploadResult,
+  type TelegramMessageWithMedia,
+} from '../_shared/image-uploads.ts';
 
 // Telegram update types we care about in this phase.
 interface TelegramUser {
@@ -24,12 +32,31 @@ interface TelegramChat {
   type: 'private' | 'group' | 'supergroup' | 'channel';
 }
 
+interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id?: string;
+  width?: number;
+  height?: number;
+  file_size?: number;
+}
+
+interface TelegramDocument {
+  file_id: string;
+  file_unique_id?: string;
+  mime_type?: string;
+  file_name?: string;
+  file_size?: number;
+}
+
 interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   date: number;
   text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
 }
 
 interface TelegramCallbackQuery {
@@ -356,7 +383,34 @@ async function workspaceName(service: ReturnType<typeof serviceRoleClient>, wsId
 // Streaming pattern: send a placeholder, then edit at most every EDIT_INTERVAL_MS.
 const EDIT_INTERVAL_MS = 1500;
 
-async function handleTextMessage(chatId: number, telegramUser: TelegramUser, text: string): Promise<Response> {
+async function ingestImageIfPresent(
+  service: ReturnType<typeof serviceRoleClient>,
+  chatId: number,
+  ref: ExtractedImageRef,
+  link: { user_id: string; current_workspace_id: string | null; current_session_id: string | null },
+): Promise<ImageUploadResult | null> {
+  try {
+    const conversationId = link.current_session_id ?? `tg-${link.user_id}-${chatId}`;
+    const result = await ingestTelegramImage(ref, {
+      botToken: env('TELEGRAM_BOT_TOKEN'),
+      supabaseUrl: env('SUPABASE_URL'),
+      serviceRoleKey: env('SUPABASE_SERVICE_ROLE_KEY'),
+      conversationId,
+    });
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await sendMessage(chatId, `Sorry, I couldn't accept that image: ${msg}`);
+    return null;
+  }
+}
+
+async function handleTextMessage(
+  chatId: number,
+  telegramUser: TelegramUser,
+  text: string,
+  imageRef: ExtractedImageRef | null = null,
+): Promise<Response> {
   const service = serviceRoleClient();
   const link = await getLinkByTelegramUser(service, telegramUser.id);
   if (!link) {
@@ -367,6 +421,13 @@ async function handleTextMessage(chatId: number, telegramUser: TelegramUser, tex
     await sendMessage(chatId, 'No active workspace. Use /use <slug> to pick one.');
     return jsonOk({ ok: true });
   }
+
+  let uploadedImage: ImageUploadResult | null = null;
+  if (imageRef) {
+    uploadedImage = await ingestImageIfPresent(service, chatId, imageRef, link);
+    if (!uploadedImage) return jsonOk({ ok: true });
+  }
+  const userMessage = buildUserMessageContent(text, uploadedImage);
 
   const placeholder = await sendMessage(chatId, '...');
   const messageId = placeholder.message_id;
@@ -401,7 +462,7 @@ async function handleTextMessage(chatId: number, telegramUser: TelegramUser, tex
         sessionId: link.current_session_id ?? undefined,
         channel: 'telegram',
         channelIdentifier: String(chatId),
-        userMessage: text,
+        userMessage,
       },
       async (ev) => {
         if (ev.type === 'session') {
@@ -580,8 +641,13 @@ async function handle(req: Request): Promise<Response> {
     if (text.startsWith('/')) {
       return await handleSlashCommand(msg.chat.id, msg.from, text);
     }
+    const imageRef = extractImageRefFromTelegramMessage(msg as TelegramMessageWithMedia);
+    if (imageRef) {
+      const captionOrText = (msg.caption ?? msg.text ?? '').trim();
+      return await handleTextMessage(msg.chat.id, msg.from, captionOrText, imageRef);
+    }
     if (text.length === 0) {
-      // Phase 5 will handle voice / photos. For now, ignore quietly.
+      // Voice / non-image documents not yet supported. Ignore quietly.
       return jsonOk({ ok: true });
     }
     return await handleTextMessage(msg.chat.id, msg.from, text);
