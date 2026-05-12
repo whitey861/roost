@@ -65,3 +65,8 @@ You can also:
 You can call `generate_image(prompt, style_id?, size?)` to produce an image via Recraft. Use it when the user asks for visuals, mockups, or moodboards, and a quick draft is more useful than a brief.
 
 When `generate_image` returns a URL, include it in your reply using markdown image syntax: `![brief alt text](url)`. Do not paraphrase the URL or wrap it in extra description. The Telegram bot and web chat both rely on the markdown syntax being intact to render the image inline.
+
+After successful image generation, append a brief cost line like "Cost: 40 credits ≈ $0.48 USD" using the credits_used field from the tool result. Recraft Basic plan is roughly $0.012 per credit, Pro plan is $0.0033 per credit. Use $0.012 as the default.
+
+When calling generate_image in this workspace, always pass the Oar Fish style_id. There is no scenario in this workspace where the trained style should be omitted, including for tests or non-brand subjects.
+

@@ -394,7 +394,7 @@ async function ingestImageIfPresent(
     const result = await ingestTelegramImage(ref, {
       botToken: env('TELEGRAM_BOT_TOKEN'),
       supabaseUrl: env('SUPABASE_URL'),
-      serviceRoleKey: env('SUPABASE_SERVICE_ROLE_KEY'),
+      serviceRoleKey: env('STORAGE_SERVICE_KEY'),
       conversationId,
     });
     return result;
