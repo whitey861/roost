@@ -51,6 +51,11 @@ export const WORKSPACES: WorkspaceSeed[] = [
   name: 'Oar Fish',
   description: 'Oar Fish streetwear label: brand voice, content production, drops, ads, email, analytics.',
   },
+  {
+    slug: 'buildit',
+    name: 'Buildit',
+    description: 'Research-and-build agent for any project: takes an idea, researches the domain, the functions of similar products, scopes a spec, queues the build via the dev worker.',
+  },
 ];
 
 // Default model for newly seeded agents. Sonnet 4.6 covers the bulk of Roost
@@ -60,11 +65,11 @@ export const WORKSPACES: WorkspaceSeed[] = [
 //   update agents set model = 'claude-opus-4-7' where name = '...';
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
-// Tool allow-list per agent. The dev workspace gets spawn_dev_agent on top
-// of the standard set; everything else stays generic.
+// Tool allow-list per agent. The dev and buildit workspaces both get
+// spawn_dev_agent + check_dev_jobs so they can queue and inspect builds.
 function toolNamesForWorkspace(slug: string): string[] {
   const base = ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'];
-  if (slug === 'dev') return [...base, 'spawn_dev_agent', 'check_dev_jobs'];
+  if (slug === 'dev' || slug === 'buildit') return [...base, 'spawn_dev_agent', 'check_dev_jobs'];
   if (slug === 'oarfish') return [...base, 'generate_image'];
   return base;
 }

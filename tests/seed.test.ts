@@ -60,7 +60,7 @@ function seedWorkspacesAndTools(db: FakeDb): { workspaceIds: Record<string, stri
 describe('seed: workspaces and agents', () => {
   it('seeds the expected workspaces', () => {
     const slugs = WORKSPACES.map((w) => w.slug).sort();
-    expect(slugs).toEqual(['budget', 'dev', 'kca', 'oarfish', 'personal', 'pmhc']);
+    expect(slugs).toEqual(['budget', 'buildit', 'dev', 'kca', 'oarfish', 'personal', 'pmhc']);
   });
 
   it('every workspace has exactly one default agent', () => {
