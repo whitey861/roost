@@ -122,7 +122,7 @@ export const TOOLS: ToolDefinition[] = [
     handlerConfig: { provider: 'claude_code' },
     requiresApprovalDefault: false,
     isOutbound: true,
-    workspaceScope: ['dev'],
+    workspaceScope: ['dev', 'buildit'],
   },
   {
     name: 'check_dev_jobs',
@@ -149,7 +149,7 @@ export const TOOLS: ToolDefinition[] = [
     handlerConfig: {},
     requiresApprovalDefault: false,
     isOutbound: false,
-    workspaceScope: ['dev'],
+    workspaceScope: ['dev', 'buildit'],
   },
   {
     name: 'generate_image',

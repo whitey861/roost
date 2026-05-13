@@ -32,7 +32,7 @@ describe('spawn_dev_agent tool registration', () => {
     // It's outbound so it shows up in the audit log even though we route
     // around the approval queue.
     expect(t?.isOutbound).toBe(true);
-    expect(t?.workspaceScope).toEqual(['dev']);
+    expect(t?.workspaceScope).toEqual(['dev', 'buildit']);
   });
 
   it('declares task_spec and target_repo as required input fields', () => {
@@ -42,10 +42,12 @@ describe('spawn_dev_agent tool registration', () => {
     expect(required).toContain('target_repo');
   });
 
-  it('is on the dev agent allow-list and not on the others', () => {
+  it('is on the dev and buildit agent allow-lists and not on the others', () => {
     const dev = AGENTS.find((a) => a.workspaceSlug === 'dev')!;
+    const buildit = AGENTS.find((a) => a.workspaceSlug === 'buildit')!;
     expect(dev.toolNames).toContain('spawn_dev_agent');
-    for (const other of AGENTS.filter((a) => a.workspaceSlug !== 'dev')) {
+    expect(buildit.toolNames).toContain('spawn_dev_agent');
+    for (const other of AGENTS.filter((a) => a.workspaceSlug !== 'dev' && a.workspaceSlug !== 'buildit')) {
       expect(other.toolNames).not.toContain('spawn_dev_agent');
     }
   });
@@ -177,19 +179,21 @@ describe('chat runtime: worker_job dispatch', () => {
 });
 
 describe('check_dev_jobs tool', () => {
-  it('exists in the TOOLS registry as an internal handler scoped to dev', () => {
+  it('exists in the TOOLS registry as an internal handler scoped to dev and buildit', () => {
     const t = TOOLS.find((x) => x.name === 'check_dev_jobs');
     expect(t).toBeTruthy();
     expect(t?.handlerType).toBe('internal');
     expect(t?.requiresApprovalDefault).toBe(false);
     expect(t?.isOutbound).toBe(false);
-    expect(t?.workspaceScope).toEqual(['dev']);
+    expect(t?.workspaceScope).toEqual(['dev', 'buildit']);
   });
 
-  it('is on the dev agent allow-list and not on the others', () => {
+  it('is on the dev and buildit agent allow-lists and not on the others', () => {
     const dev = AGENTS.find((a) => a.workspaceSlug === 'dev')!;
+    const buildit = AGENTS.find((a) => a.workspaceSlug === 'buildit')!;
     expect(dev.toolNames).toContain('check_dev_jobs');
-    for (const other of AGENTS.filter((a) => a.workspaceSlug !== 'dev')) {
+    expect(buildit.toolNames).toContain('check_dev_jobs');
+    for (const other of AGENTS.filter((a) => a.workspaceSlug !== 'dev' && a.workspaceSlug !== 'buildit')) {
       expect(other.toolNames).not.toContain('check_dev_jobs');
     }
   });
