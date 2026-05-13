@@ -5,7 +5,11 @@ import {
   parseApprovalCallback,
   parseSlashCommand,
   parseSpawnArgs,
+  sendChunkedReply,
+  splitForTelegram,
   TELEGRAM_CAPTION_LIMIT,
+  TELEGRAM_MESSAGE_LIMIT,
+  TELEGRAM_SPLIT_THRESHOLD,
 } from '../shared/telegram-helpers.js';
 
 describe('parseSlashCommand', () => {
@@ -139,6 +143,150 @@ describe('extractFirstImageMarkdown', () => {
       '![a](https://e.com/a.png) and ![b](https://e.com/b.png)',
     );
     expect(r?.imageUrl).toBe('https://e.com/a.png');
+  });
+});
+
+describe('splitForTelegram', () => {
+  it('returns an empty array for empty input', () => {
+    expect(splitForTelegram('')).toEqual([]);
+  });
+
+  it('returns the input as a single chunk when it is under the threshold', () => {
+    expect(splitForTelegram('hello world')).toEqual(['hello world']);
+  });
+
+  it('splits on paragraph boundaries when the text exceeds the threshold', () => {
+    const a = 'a'.repeat(2000);
+    const b = 'b'.repeat(2000);
+    const c = 'c'.repeat(2000);
+    const text = `${a}\n\n${b}\n\n${c}`;
+    const chunks = splitForTelegram(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const ch of chunks) {
+      expect(ch.length).toBeLessThanOrEqual(TELEGRAM_SPLIT_THRESHOLD);
+    }
+    // Each original paragraph is preserved intact in some chunk.
+    expect(chunks.some((ch) => ch.includes(a))).toBe(true);
+    expect(chunks.some((ch) => ch.includes(b))).toBe(true);
+    expect(chunks.some((ch) => ch.includes(c))).toBe(true);
+  });
+
+  it('falls back to sentence boundaries when a single paragraph exceeds the threshold', () => {
+    const sentence = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit.';
+    const para = Array(120).fill(sentence).join(' ');
+    expect(para.length).toBeGreaterThan(TELEGRAM_SPLIT_THRESHOLD);
+    const chunks = splitForTelegram(para);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const ch of chunks) {
+      expect(ch.length).toBeLessThanOrEqual(TELEGRAM_SPLIT_THRESHOLD);
+      // Chunks should end at a sentence boundary (last character is a
+      // sentence terminator), preserving readable formatting.
+      expect(/[.!?]$/.test(ch.trim())).toBe(true);
+    }
+  });
+
+  it('hard-splits as a last resort when no boundaries exist', () => {
+    const giant = 'x'.repeat(10_000);
+    const chunks = splitForTelegram(giant);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const ch of chunks) {
+      expect(ch.length).toBeLessThanOrEqual(TELEGRAM_SPLIT_THRESHOLD);
+    }
+    expect(chunks.join('')).toBe(giant);
+  });
+
+  it('every chunk stays comfortably under the 4096-char Telegram limit', () => {
+    const para = 'word '.repeat(800).trim();
+    const text = Array(5).fill(para).join('\n\n');
+    for (const ch of splitForTelegram(text)) {
+      expect(ch.length).toBeLessThan(TELEGRAM_MESSAGE_LIMIT);
+    }
+  });
+});
+
+describe('sendChunkedReply', () => {
+  it('uses a single editMessageText for short replies', async () => {
+    const calls: Array<{ method: 'edit' | 'send'; text: string }> = [];
+    const sender = {
+      sendMessage: async (_chatId: number, text: string) => {
+        calls.push({ method: 'send', text });
+        return { message_id: 0, chat: { id: 0 } };
+      },
+      editMessageText: async (_chatId: number, _messageId: number, text: string) => {
+        calls.push({ method: 'edit', text });
+      },
+    };
+    await sendChunkedReply(sender, 1, 99, 'short reply');
+    expect(calls).toEqual([{ method: 'edit', text: 'short reply' }]);
+  });
+
+  it('sends a 12000-char response as multiple sendMessage calls in order', async () => {
+    // Build a 12000-char response with paragraph boundaries to exercise
+    // the paragraph-split path. Each paragraph is short enough that the
+    // sentence/hard-split fallbacks are not needed here.
+    const paragraph = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(15).trim();
+    const paragraphs: string[] = [];
+    while (paragraphs.join('\n\n').length < 12000) {
+      paragraphs.push(paragraph);
+    }
+    const text = paragraphs.join('\n\n');
+    expect(text.length).toBeGreaterThanOrEqual(12000);
+
+    const calls: Array<{ method: 'edit' | 'send'; chatId: number; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: number, msg: string) => {
+        calls.push({ method: 'send', chatId, text: msg });
+        return { message_id: 100 + calls.length, chat: { id: chatId } };
+      },
+      editMessageText: async (chatId: number, _messageId: number, msg: string) => {
+        calls.push({ method: 'edit', chatId, text: msg });
+      },
+    };
+
+    const chunkCount = await sendChunkedReply(sender, 42, 99, text);
+
+    // Returned chunk count matches the call count.
+    expect(calls.length).toBe(chunkCount);
+
+    // The placeholder is replaced by editMessageText with chunk 1; every
+    // subsequent chunk is sent as a new sendMessage.
+    expect(calls[0]!.method).toBe('edit');
+    expect(calls.slice(1).every((c) => c.method === 'send')).toBe(true);
+
+    // "Multiple sendMessage calls" — at least 2 follow-up messages for
+    // a 12000-char response chunked at 3500 chars.
+    const sendCalls = calls.filter((c) => c.method === 'send');
+    expect(sendCalls.length).toBeGreaterThanOrEqual(2);
+
+    // All chunks are under the threshold (and therefore under the
+    // 4096-char Telegram per-message limit).
+    for (const c of calls) {
+      expect(c.text.length).toBeLessThanOrEqual(TELEGRAM_SPLIT_THRESHOLD);
+    }
+
+    // All chunks routed to the same chat id, in order.
+    for (const c of calls) {
+      expect(c.chatId).toBe(42);
+    }
+
+    // The chunks reassemble (paragraph-separated) to the original text,
+    // preserving the original ordering.
+    expect(calls.map((c) => c.text).join('\n\n')).toBe(text);
+  });
+
+  it('falls back to a "(no reply)" edit when the buffer is empty', async () => {
+    const calls: string[] = [];
+    const sender = {
+      sendMessage: async () => {
+        calls.push('send');
+        return { message_id: 0, chat: { id: 0 } };
+      },
+      editMessageText: async (_c: number, _m: number, text: string) => {
+        calls.push(`edit:${text}`);
+      },
+    };
+    await sendChunkedReply(sender, 1, 99, '');
+    expect(calls).toEqual(['edit:(no reply)']);
   });
 });
 
