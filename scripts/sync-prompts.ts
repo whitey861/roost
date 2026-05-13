@@ -10,8 +10,13 @@
 //   npm run sync-prompts -- --dry-run         # show diff but do not write
 //
 // Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in environment.
+//
+// This script talks to PostgREST directly via fetch instead of using
+// @supabase/supabase-js, which transitively requires a global WebSocket and
+// fails to import on Node 20 with "Node.js 20 detected without native
+// WebSocket support". The script only reads two rows and writes one column,
+// so the full client is overkill.
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { config as loadEnv } from 'dotenv';
 import { AGENTS, loadSystemPrompt, type AgentSeed } from '../shared/agents.js';
 
@@ -70,53 +75,89 @@ interface SyncResult {
   diff?: string;
 }
 
+export interface PromptSyncClient {
+  getWorkspaceIdBySlug(slug: string): Promise<string | null>;
+  getAgent(workspaceId: string, name: string): Promise<{ id: string; system_prompt: string } | null>;
+  updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void>;
+}
+
+export function createRestClient(url: string, serviceKey: string): PromptSyncClient {
+  const baseUrl = `${url.replace(/\/$/, '')}/rest/v1`;
+  const baseHeaders: Record<string, string> = {
+    apikey: serviceKey,
+    Authorization: `Bearer ${serviceKey}`,
+  };
+
+  async function request(path: string, init: RequestInit = {}): Promise<Response> {
+    const res = await fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: { ...baseHeaders, ...((init.headers as Record<string, string> | undefined) ?? {}) },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Supabase REST ${init.method ?? 'GET'} ${path} failed: ${res.status} ${body}`);
+    }
+    return res;
+  }
+
+  return {
+    async getWorkspaceIdBySlug(slug) {
+      const path = `/workspaces?select=id&slug=eq.${encodeURIComponent(slug)}&limit=1`;
+      const res = await request(path);
+      const rows = (await res.json()) as Array<{ id: string }>;
+      return rows[0]?.id ?? null;
+    },
+    async getAgent(workspaceId, name) {
+      const qs = `select=id,system_prompt&workspace_id=eq.${encodeURIComponent(workspaceId)}&name=eq.${encodeURIComponent(name)}&limit=1`;
+      const res = await request(`/agents?${qs}`);
+      const rows = (await res.json()) as Array<{ id: string; system_prompt: string }>;
+      return rows[0] ?? null;
+    },
+    async updateAgentSystemPrompt(agentId, systemPrompt) {
+      await request(`/agents?id=eq.${encodeURIComponent(agentId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({ system_prompt: systemPrompt }),
+      });
+    },
+  };
+}
+
 export async function syncOnePrompt(
-  client: SupabaseClient,
+  client: PromptSyncClient,
   agent: AgentSeed,
   options: { dryRun?: boolean } = {},
 ): Promise<SyncResult> {
   const desired = loadSystemPrompt(agent);
 
-  // Look up the workspace by slug.
-  const { data: ws, error: wsErr } = await client
-    .from('workspaces')
-    .select('id')
-    .eq('slug', agent.workspaceSlug)
-    .maybeSingle();
-  if (wsErr) throw new Error(`workspace lookup ${agent.workspaceSlug}: ${wsErr.message}`);
-  if (!ws) {
+  const workspaceId = await client.getWorkspaceIdBySlug(agent.workspaceSlug);
+  if (!workspaceId) {
     return { agentName: agent.name, workspaceSlug: agent.workspaceSlug, status: 'missing-workspace' };
   }
-  const workspaceId = (ws as { id: string }).id;
 
-  const { data: existing, error: aErr } = await client
-    .from('agents')
-    .select('id, system_prompt')
-    .eq('workspace_id', workspaceId)
-    .eq('name', agent.name)
-    .maybeSingle();
-  if (aErr) throw new Error(`agent lookup ${agent.name}: ${aErr.message}`);
+  const existing = await client.getAgent(workspaceId, agent.name);
   if (!existing) {
     return { agentName: agent.name, workspaceSlug: agent.workspaceSlug, status: 'missing-agent' };
   }
-  const row = existing as { id: string; system_prompt: string };
 
-  if (row.system_prompt === desired) {
+  if (existing.system_prompt === desired) {
     return { agentName: agent.name, workspaceSlug: agent.workspaceSlug, status: 'unchanged' };
   }
 
-  const diff = diffSummary(row.system_prompt ?? '', desired);
+  const diff = diffSummary(existing.system_prompt ?? '', desired);
   if (options.dryRun) {
     return { agentName: agent.name, workspaceSlug: agent.workspaceSlug, status: 'updated', diff };
   }
 
-  const { error } = await client.from('agents').update({ system_prompt: desired }).eq('id', row.id);
-  if (error) throw new Error(`agent update ${agent.name}: ${error.message}`);
+  await client.updateAgentSystemPrompt(existing.id, desired);
   return { agentName: agent.name, workspaceSlug: agent.workspaceSlug, status: 'updated', diff };
 }
 
 export async function syncPrompts(
-  client: SupabaseClient,
+  client: PromptSyncClient,
   options: { workspace?: string; dryRun?: boolean } = {},
 ): Promise<SyncResult[]> {
   const targets = options.workspace
@@ -136,9 +177,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const url = requireEnv('SUPABASE_URL');
   const serviceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
-  const client = createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const client = createRestClient(url, serviceKey);
 
   const results = await syncPrompts(client, { workspace: args.workspace, dryRun: args.dryRun });
   for (const r of results) {
