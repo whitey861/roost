@@ -11,13 +11,33 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { WORKSPACES, AGENTS, DEFAULT_MODEL, loadSystemPrompt } from '../shared/agents.js';
 import { TOOLS } from '../shared/tools.js';
 import { ensureAgents } from '../scripts/seed.js';
-import { syncOnePrompt, syncPrompts } from '../scripts/sync-prompts.js';
+import { syncOnePrompt, syncPrompts, type PromptSyncClient } from '../scripts/sync-prompts.js';
 import { FakeDb, FakeSupabaseClient } from './fakes/fake-supabase.js';
 
 function fakeClient(): { client: SupabaseClient; db: FakeDb } {
   const db = new FakeDb();
   const client = new FakeSupabaseClient(db) as unknown as SupabaseClient;
   return { client, db };
+}
+
+function fakePromptClient(db: FakeDb): PromptSyncClient {
+  return {
+    async getWorkspaceIdBySlug(slug) {
+      const row = db.tableRows('workspaces').find((r) => r.slug === slug);
+      return row ? (row.id as string) : null;
+    },
+    async getAgent(workspaceId, name) {
+      const row = db.tableRows('agents').find(
+        (r) => r.workspace_id === workspaceId && r.name === name,
+      );
+      if (!row) return null;
+      return { id: row.id as string, system_prompt: (row.system_prompt as string) ?? '' };
+    },
+    async updateAgentSystemPrompt(agentId, systemPrompt) {
+      const row = db.tableRows('agents').find((r) => r.id === agentId);
+      if (row) row.system_prompt = systemPrompt;
+    },
+  };
 }
 
 function seedWorkspacesAndTools(db: FakeDb): { workspaceIds: Record<string, string>; toolIds: Record<string, string> } {
@@ -186,7 +206,7 @@ describe('ensureAgents: behaviour', () => {
 
 describe('syncPrompts: behaviour', () => {
   it('updates a stale system_prompt for one workspace', async () => {
-    const { client, db } = fakeClient();
+    const { db } = fakeClient();
     const { workspaceIds } = seedWorkspacesAndTools(db);
 
     // Existing agent with a stale prompt body.
@@ -203,7 +223,7 @@ describe('syncPrompts: behaviour', () => {
       },
     ]);
 
-    const results = await syncPrompts(client, { workspace: 'pmhc' });
+    const results = await syncPrompts(fakePromptClient(db), { workspace: 'pmhc' });
     expect(results).toHaveLength(1);
     expect(results[0]?.status).toBe('updated');
     expect(results[0]?.diff).toMatch(/words/);
@@ -213,7 +233,7 @@ describe('syncPrompts: behaviour', () => {
   });
 
   it('reports unchanged when the DB matches the file', async () => {
-    const { client, db } = fakeClient();
+    const { db } = fakeClient();
     const { workspaceIds } = seedWorkspacesAndTools(db);
     const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
     const text = loadSystemPrompt(pmhcAgent);
@@ -229,20 +249,20 @@ describe('syncPrompts: behaviour', () => {
       },
     ]);
 
-    const r = await syncOnePrompt(client, pmhcAgent);
+    const r = await syncOnePrompt(fakePromptClient(db), pmhcAgent);
     expect(r.status).toBe('unchanged');
   });
 
   it('reports missing-agent when the agent does not exist yet', async () => {
-    const { client, db } = fakeClient();
+    const { db } = fakeClient();
     seedWorkspacesAndTools(db);
     const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
-    const r = await syncOnePrompt(client, pmhcAgent);
+    const r = await syncOnePrompt(fakePromptClient(db), pmhcAgent);
     expect(r.status).toBe('missing-agent');
   });
 
   it('--dry-run does not write', async () => {
-    const { client, db } = fakeClient();
+    const { db } = fakeClient();
     const { workspaceIds } = seedWorkspacesAndTools(db);
     const pmhcAgent = AGENTS.find((a) => a.workspaceSlug === 'pmhc')!;
     db.seedTable('agents', [
@@ -256,7 +276,7 @@ describe('syncPrompts: behaviour', () => {
         allowed_tool_ids: [],
       },
     ]);
-    const r = await syncOnePrompt(client, pmhcAgent, { dryRun: true });
+    const r = await syncOnePrompt(fakePromptClient(db), pmhcAgent, { dryRun: true });
     expect(r.status).toBe('updated');
     expect(db.tableRows('agents')[0]?.system_prompt).toBe('untouched');
   });
