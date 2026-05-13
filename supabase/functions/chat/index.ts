@@ -1,7 +1,11 @@
 // Roost: POST /chat
 // Authenticated, member-only entrypoint for the web chat. Streams SSE
 // events back to the client. Body shape:
-//   { workspace_id: uuid, session_id?: uuid, agent_id?: uuid, message: string }
+//   { workspace_id: uuid, conversation_id?: uuid, agent_id?: uuid, message: string }
+//
+// `session_id` is accepted as a legacy alias for `conversation_id` so older
+// clients keep working; `conversation_id` is preferred and is what the web UI
+// sends.
 
 import { requireAuth } from '../_shared/auth.ts';
 import { serviceRoleClient } from '../_shared/supabase.ts';
@@ -12,6 +16,7 @@ import type { ChatStreamEvent } from '../_shared/types.ts';
 
 interface ChatRequestBody {
   workspace_id?: string;
+  conversation_id?: string;
   session_id?: string;
   agent_id?: string;
   message?: string;
@@ -66,6 +71,20 @@ async function handle(req: Request): Promise<Response> {
 
   const anthropic = defaultAnthropicClient();
 
+  const incomingSessionId =
+    (typeof body.conversation_id === 'string' && body.conversation_id) ||
+    (typeof body.session_id === 'string' && body.session_id) ||
+    undefined;
+
+  console.log(JSON.stringify({
+    at: 'chat.session_resolution.request',
+    workspace_id: body.workspace_id,
+    user_id: auth.userId,
+    received_conversation_id: body.conversation_id ?? null,
+    received_session_id: body.session_id ?? null,
+    resolved_incoming_session_id: incomingSessionId ?? null,
+  }));
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
@@ -75,7 +94,7 @@ async function handle(req: Request): Promise<Response> {
           workspaceId: body.workspace_id!,
           userId: auth.userId,
           agentId: body.agent_id,
-          sessionId: body.session_id,
+          sessionId: incomingSessionId,
           channel: 'web',
           userMessage: body.message!,
         })) {
