@@ -115,6 +115,116 @@ export function extractFirstImageMarkdown(text: string): ExtractedImage | null {
   };
 }
 
+// Telegram per-message text hard limit. We split below this to leave
+// headroom for client-side rendering quirks and to avoid edge-case 400s
+// when Telegram counts surrogate pairs differently than JS string length.
+export const TELEGRAM_MESSAGE_LIMIT = 4096;
+export const TELEGRAM_SPLIT_THRESHOLD = 3500;
+
+// Splits a long response into chunks at or below maxChunkSize. Prefers
+// paragraph boundaries (double newlines); falls back to sentence
+// boundaries for paragraphs that overflow on their own; hard-splits as a
+// last resort. Empty input returns an empty array; short input returns
+// a single-element array.
+export function splitForTelegram(text: string, maxChunkSize: number = TELEGRAM_SPLIT_THRESHOLD): string[] {
+  if (text.length === 0) return [];
+  if (text.length <= maxChunkSize) return [text];
+
+  const chunks: string[] = [];
+  let current = '';
+
+  const flush = (): void => {
+    if (current.length > 0) {
+      chunks.push(current);
+      current = '';
+    }
+  };
+
+  const tryAppend = (piece: string, sep: string): boolean => {
+    if (current.length === 0) {
+      if (piece.length <= maxChunkSize) {
+        current = piece;
+        return true;
+      }
+      return false;
+    }
+    const next = current + sep + piece;
+    if (next.length <= maxChunkSize) {
+      current = next;
+      return true;
+    }
+    return false;
+  };
+
+  const paragraphs = text.split(/\n\n+/);
+  for (const para of paragraphs) {
+    if (para.length === 0) continue;
+
+    if (tryAppend(para, '\n\n')) continue;
+
+    flush();
+    if (para.length <= maxChunkSize) {
+      current = para;
+      continue;
+    }
+
+    // Paragraph alone exceeds the limit; split on sentence boundaries.
+    const sentences = para.split(/(?<=[.!?])\s+/);
+    for (const sent of sentences) {
+      if (sent.length === 0) continue;
+
+      if (tryAppend(sent, ' ')) continue;
+
+      flush();
+      if (sent.length <= maxChunkSize) {
+        current = sent;
+        continue;
+      }
+
+      // Sentence itself is over the limit; hard-split by character. This
+      // can sever markdown formatting but is a last-resort safety net.
+      let remainder = sent;
+      while (remainder.length > maxChunkSize) {
+        chunks.push(remainder.slice(0, maxChunkSize));
+        remainder = remainder.slice(maxChunkSize);
+      }
+      if (remainder.length > 0) current = remainder;
+    }
+  }
+
+  flush();
+  return chunks;
+}
+
+// Minimal interface a chunked sender depends on. Lets us unit-test the
+// orchestrator without standing up the real Telegram HTTP client.
+export interface ChunkedSender {
+  sendMessage(chatId: number, text: string): Promise<unknown>;
+  editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
+}
+
+// Replaces a single oversized editMessageText with: an edit of the
+// placeholder using the first chunk, plus sendMessage calls for each
+// subsequent chunk. Short replies still go via one editMessageText.
+export async function sendChunkedReply(
+  sender: ChunkedSender,
+  chatId: number,
+  placeholderMessageId: number,
+  text: string,
+  maxChunkSize: number = TELEGRAM_SPLIT_THRESHOLD,
+): Promise<number> {
+  const chunks = splitForTelegram(text, maxChunkSize);
+  if (chunks.length === 0) {
+    await sender.editMessageText(chatId, placeholderMessageId, '(no reply)');
+    return 1;
+  }
+  await sender.editMessageText(chatId, placeholderMessageId, chunks[0]!);
+  for (let i = 1; i < chunks.length; i++) {
+    await sender.sendMessage(chatId, chunks[i]!);
+  }
+  return chunks.length;
+}
+
 // Pure 6-digit code generator. Uses crypto.getRandomValues which is
 // available in Node 19+ and Deno.
 export function generatePairingCode(): string {

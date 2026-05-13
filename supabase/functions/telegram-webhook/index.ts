@@ -9,7 +9,7 @@ import { env, envOptional } from '../_shared/env.ts';
 import { jsonError, jsonOk } from '../_shared/errors.ts';
 import { defaultAnthropicClient } from '../_shared/anthropic.ts';
 import { runChatCollecting } from '../_shared/chat-runtime.ts';
-import { answerCallbackQuery, editMessageText, sendMessage, sendPhoto, TELEGRAM_CAPTION_LIMIT, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
+import { answerCallbackQuery, editMessageText, sendChunkedReply, sendMessage, sendPhoto, TELEGRAM_CAPTION_LIMIT, TELEGRAM_SPLIT_THRESHOLD, type InlineKeyboardMarkup } from '../_shared/telegram.ts';
 import {
   buildUserMessageContent,
   extractImageRefFromTelegramMessage,
@@ -438,7 +438,10 @@ async function handleTextMessage(
 
   const flushIfDue = async (force: boolean): Promise<void> => {
     const now = Date.now();
-    const display = buffer.length > 0 ? buffer : '...';
+    // Cap progress edits at the split threshold; the final flush sends
+    // the rest as follow-up messages via sendChunkedReply.
+    const raw = buffer.length > 0 ? buffer : '...';
+    const display = raw.length > TELEGRAM_SPLIT_THRESHOLD ? raw.slice(0, TELEGRAM_SPLIT_THRESHOLD) : raw;
     if (display === lastEditedText) return;
     if (!force && now - lastEditAt < EDIT_INTERVAL_MS) return;
     try {
@@ -506,9 +509,13 @@ async function handleTextMessage(
         await sendMessage(chatId, image.caption);
       }
     } else {
-      await flushIfDue(true);
       if (buffer.length === 0) {
         await editMessageText(chatId, messageId, '(no reply)');
+      } else {
+        // Split responses that exceed Telegram's per-message limit into
+        // multiple sequential messages (edit the placeholder with chunk
+        // 1, sendMessage for the rest).
+        await sendChunkedReply(chatId, messageId, buffer);
       }
     }
     void result;
