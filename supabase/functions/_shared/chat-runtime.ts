@@ -67,8 +67,38 @@ async function loadOrCreateSession(
   args: { workspaceId: string; userId: string; agentId: string; channel: ChannelType; channelIdentifier?: string; sessionId?: string; firstMessage: string },
 ): Promise<string> {
   if (args.sessionId) {
-    const { data, error } = await client.from('sessions').select('id').eq('id', args.sessionId).single();
-    if (error || !data) throw new Error(`Session not found: ${args.sessionId}`);
+    const { data, error } = await client
+      .from('sessions')
+      .select('id, workspace_id, user_id')
+      .eq('id', args.sessionId)
+      .eq('workspace_id', args.workspaceId)
+      .eq('user_id', args.userId)
+      .maybeSingle();
+    if (error) {
+      console.log(JSON.stringify({
+        at: 'chat.session_resolution.lookup_error',
+        session_id: args.sessionId,
+        workspace_id: args.workspaceId,
+        user_id: args.userId,
+        error: error.message,
+      }));
+      throw new Error(`Session lookup failed: ${error.message}`);
+    }
+    if (!data) {
+      console.log(JSON.stringify({
+        at: 'chat.session_resolution.not_found_or_not_owned',
+        session_id: args.sessionId,
+        workspace_id: args.workspaceId,
+        user_id: args.userId,
+      }));
+      throw new Error(`Session not found or not owned by caller: ${args.sessionId}`);
+    }
+    console.log(JSON.stringify({
+      at: 'chat.session_resolution.continued',
+      session_id: (data as { id: string }).id,
+      workspace_id: args.workspaceId,
+      user_id: args.userId,
+    }));
     return (data as { id: string }).id;
   }
   const title = args.firstMessage.slice(0, 60);
@@ -85,6 +115,13 @@ async function loadOrCreateSession(
     .select('id')
     .single();
   if (error || !data) throw new Error(`Session create failed: ${error?.message}`);
+  console.log(JSON.stringify({
+    at: 'chat.session_resolution.created',
+    session_id: (data as { id: string }).id,
+    workspace_id: args.workspaceId,
+    user_id: args.userId,
+    channel: args.channel,
+  }));
   return (data as { id: string }).id;
 }
 
