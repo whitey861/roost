@@ -16,14 +16,23 @@ export interface ToolRow {
   workspace_scope: string[];
 }
 
-export async function loadAgentTools(client: SupabaseClient, _agentId: string, allowedToolIds: string[]): Promise<ToolRow[]> {
+export async function loadAgentTools(client: SupabaseClient, agentId: string, allowedToolIds: string[]): Promise<ToolRow[]> {
   if (allowedToolIds.length === 0) return [];
   const { data, error } = await client
     .from('tools')
     .select('id, name, description, input_schema, handler_type, handler_config, requires_approval_default, is_outbound, workspace_scope')
     .in('id', allowedToolIds);
   if (error) throw new Error(`Failed to load tools: ${error.message}`);
-  return (data ?? []) as ToolRow[];
+  const rows = (data ?? []) as ToolRow[];
+
+  const { data: disabled, error: dErr } = await client
+    .from('agent_tool_overrides')
+    .select('tool_id')
+    .eq('agent_id', agentId)
+    .eq('enabled', false);
+  if (dErr) throw new Error(`Failed to load tool overrides: ${dErr.message}`);
+  const disabledIds = new Set(((disabled ?? []) as Array<{ tool_id: string }>).map((d) => d.tool_id));
+  return rows.filter((t) => !disabledIds.has(t.id));
 }
 
 export function toAnthropicToolDefs(rows: ToolRow[]): AnthropicToolDef[] {
