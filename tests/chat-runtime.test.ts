@@ -200,3 +200,28 @@ describe('runChat: embedder injection', () => {
     expect(calls).toBe(1);
   });
 });
+
+describe('runChat: maxTokens cap', () => {
+  it('asks Anthropic for enough output tokens to fit a long preamble plus a long tool_use input', async () => {
+    // Regression: a 1024 cap truncated multi-paragraph spec replies before
+    // the spawn_dev_agent tool_use block was emitted, so the runtime saw
+    // stop_reason='max_tokens' and quietly exited without queueing the job.
+    const fx = seedFakeDb();
+    const anthropic = new FakeAnthropic([
+      { text: 'ok.', stopReason: 'end_turn', inputTokens: 1, outputTokens: 1 },
+    ]);
+
+    await collect(runChat({
+      client: client(fx.db),
+      anthropic,
+      workspaceId: fx.workspaceId,
+      userId: fx.userId,
+      channel: 'web',
+      userMessage: 'hi',
+      embedQueryFn: fakeQueryEmbedder,
+    }));
+
+    expect(anthropic.calls).toHaveLength(1);
+    expect(anthropic.calls[0]!.maxTokens).toBeGreaterThanOrEqual(8192);
+  });
+});

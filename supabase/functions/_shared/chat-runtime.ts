@@ -362,7 +362,10 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
       systemPrompt: effectiveSystemPrompt,
       messages: [...messages],
       tools: toolDefs,
-      maxTokens: 1024,
+      // Generous cap so a long preamble plus a long tool_use input (e.g.
+      // spawn_dev_agent's task_spec) can both fit in one turn. 1024 was
+      // truncating multi-paragraph spec queues before the tool_use block.
+      maxTokens: 16384,
     };
 
     let stopReason: string | null = null;
