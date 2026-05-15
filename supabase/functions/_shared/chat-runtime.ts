@@ -14,6 +14,7 @@ import type { ChatStreamEvent, ChannelType, WorkspaceApprovalMode } from './type
 import { addSpend, getBudgetState, isOverBudget, rolloverIfNeeded } from './budget.ts';
 import { approvalRequired, loadAgentTools, runMockTool, SERVER_TOOL_NAMES, toAnthropicToolDefs, type ToolRow } from './tools.ts';
 import { generateImage, type GenerateImageInput } from './tool-handlers/generate-image.ts';
+import { createGithubRepo, type CreateGithubRepoInput } from './tool-handlers/create-github-repo.ts';
 import type { AnthropicClient, AnthropicMessage, AnthropicMessageContent, StreamRequest } from './anthropic.ts';
 import { costUsd } from './pricing.ts';
 import { formatKnowledgeBlock, retrieveTopK, type KnowledgeHit, type QueryEmbedder } from './retrieval.ts';
@@ -552,6 +553,9 @@ export async function* runChat(params: RunChatParams): AsyncIterable<ChatStreamE
           out = { hits };
         } else if (toolRow.handler_type === 'internal' && tu.name === 'generate_image') {
           const result = await generateImage(tu.input as unknown as GenerateImageInput);
+          out = result as unknown as Record<string, unknown>;
+        } else if (toolRow.handler_type === 'internal' && tu.name === 'create_github_repo') {
+          const result = await createGithubRepo(tu.input as unknown as CreateGithubRepoInput);
           out = result as unknown as Record<string, unknown>;
         } else if (toolRow.handler_type === 'internal' && tu.name === 'check_dev_jobs') {
           const limit = Math.min(20, Math.max(1, Number(tu.input.limit ?? 5)));

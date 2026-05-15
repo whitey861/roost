@@ -69,7 +69,7 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 // spawn_dev_agent + check_dev_jobs so they can queue and inspect builds.
 function toolNamesForWorkspace(slug: string): string[] {
   const base = ['mock_echo', 'mock_search', 'search_knowledge', 'web_search'];
-  if (slug === 'dev' || slug === 'buildit') return [...base, 'spawn_dev_agent', 'check_dev_jobs'];
+  if (slug === 'dev' || slug === 'buildit') return [...base, 'spawn_dev_agent', 'check_dev_jobs', 'create_github_repo'];
   if (slug === 'oarfish') return [...base, 'generate_image'];
   return base;
 }

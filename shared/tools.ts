@@ -152,6 +152,40 @@ export const TOOLS: ToolDefinition[] = [
     workspaceScope: ['dev', 'buildit'],
   },
   {
+    name: 'create_github_repo',
+    description:
+      'Create a new GitHub repository. Use this before spawn_dev_agent when starting a brand-new project so the dev worker has a real repo to clone. Returns the full_name (owner/name), clone_url, and html_url. Repos default to private. Pass `owner` only when the new repo should sit under an organisation; otherwise it lands under the authenticated user.',
+    inputSchema: {
+      type: 'object',
+      required: ['name'],
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Repo name (without owner). Short, lowercase, hyphenated.',
+        },
+        description: {
+          type: 'string',
+          description: 'Optional one-line repo description shown on GitHub.',
+        },
+        private: {
+          type: 'boolean',
+          description: 'Whether the repo should be private. Defaults to true.',
+          default: true,
+        },
+        owner: {
+          type: 'string',
+          description:
+            'Optional organisation or user that owns the repo. Defaults to the authenticated user.',
+        },
+      },
+    },
+    handlerType: 'internal',
+    handlerConfig: {},
+    requiresApprovalDefault: false,
+    isOutbound: true,
+    workspaceScope: ['buildit', 'dev'],
+  },
+  {
     name: 'generate_image',
     description:
       'Generate an image using Recraft based on a text prompt. Optionally takes a Recraft style_id to apply a trained brand style. Returns a public image URL the assistant should embed in the reply using markdown image syntax: ![alt](url).',
